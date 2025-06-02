@@ -29,6 +29,33 @@ import aiofiles
 import aiofiles.os as aios
 from pathlib import Path
 
+import requests
+from tqdm import tqdm
+
+MODEL_URL = "https://huggingface.co/Geworg/phi2-gguf/resolve/main/phi-2.Q4_K_M.gguf"
+MODEL_PATH = "phi-2.Q4_K_M.gguf"
+
+def download_model(url, dest_path):
+    if os.path.exists(dest_path):
+        print(f"✔ Модель уже есть: {dest_path}")
+        return
+
+    print(f"⬇ Скачиваем модель из {url} ...")
+    response = requests.get(url, stream=True)
+    total = int(response.headers.get('content-length', 0))
+    with open(dest_path, 'wb') as file, tqdm(
+        desc=dest_path,
+        total=total,
+        unit='iB',
+        unit_scale=True,
+        unit_divisor=1024,
+    ) as bar:
+        for data in response.iter_content(chunk_size=1024):
+            size = file.write(data)
+            bar.update(size)
+
+download_model(MODEL_URL, MODEL_PATH)
+
 # --- КОНСТАНТЫ ---
 class UserSteps(Enum):
     NONE = auto()
