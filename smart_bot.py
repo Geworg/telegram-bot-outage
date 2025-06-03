@@ -14,7 +14,7 @@ import urllib.parse
 import hashlib
 from dotenv import load_dotenv
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
-from telegram.ext import Application, ApplicationBuilder, CallbackQueryHandler, ContextTypes, CommandHandler, MessageHandler, filters, BasePersistence, JobQueue, JSONPersistence # PicklePersistence
+from telegram.ext import Application, ApplicationBuilder, CallbackQueryHandler, ContextTypes, CommandHandler, MessageHandler, filters, BasePersistence, JobQueue, PicklePersistence
 from telegram.constants import ParseMode
 from telegram.error import Forbidden, RetryAfter, TimedOut, NetworkError
 from logger import log_info, log_error, log_warning
