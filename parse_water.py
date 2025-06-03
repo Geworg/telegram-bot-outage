@@ -82,12 +82,10 @@ async def extract_electric_info_async(text_content: str) -> dict:
     if not await is_ai_available():
         log_warning("AI service is not available. Skipping electric info extraction.")
         return {"error": "AI service unavailable", "original_text": text_content}
-
     # The prompt should be designed to handle both planned text blocks and structured " | " separated table rows.
     # This might require two different prompts or a very robust single prompt.
     # For simplicity, assuming a robust PROMPT_TEMPLATE_ELECTRIC exists or is configured in ai_engine.
     prompt_template = "Extract structured outage information from the following Armenian electricity announcement. The text might be a general announcement or a table row with fields separated by '|'. Fields to extract: publication_date_on_site, shutdown_type (planned/emergency), start_datetime, end_datetime, duration_hours, region, city_district, street_address, additional_info. Format dates as YYYY-MM-DD HH:MM. If it's a general announcement, capture the overall message. If it's a table row, interpret the columns appropriately. Current date for reference if publication date is missing: " + datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-
     try:
         structured_data = await structure_text_with_ai_async(text_content, prompt_template, "electric")
         if not structured_data:
@@ -142,7 +140,6 @@ async def parse_all_electric_announcements_async() -> list[dict]:
 #         #     return {"mock_data": text[:50]}
 #         # is_ai_available = mock_is_ai_available
 #         # structure_text_with_ai_async = mock_structure_text_with_ai_async
-          
 #         results = await parse_all_electric_announcements_async()
 #         if results:
 #             print(f"Successfully parsed {len(results)} electric announcements:")
