@@ -30,7 +30,6 @@ from ai_engine import clarify_address_ai, is_ai_available, MODEL_PATH as AI_MODE
 import aiofiles
 import aiofiles.os as aios
 from pathlib import Path
-import pytz
 
 # --- КОНСТАНТЫ ---
 class UserSteps(Enum):
@@ -66,14 +65,29 @@ CALLBACK_PREFIX_FAQ_ITEM = "faq_item:"
 CALLBACK_PREFIX_SOUND = "sound_set:"
 
 FREQUENCY_OPTIONS = {
-    "Free_6h":  {"interval": 21600, "hy": "⏱ 6 ժամ", "ru": "⏱ 6 часов", "en": "⏱ 6 hours",  "tier": "Free"},
-    "Free_12h": {"interval": 43200, "hy": "⏱ 12 ժամ","ru": "⏱ 12 часов","en": "⏱ 12 hours", "tier": "Free"},
-    "Free_24h": {"interval": 86400, "hy": "⏱ 24 ժամ","ru": "⏱ 24 часа", "en": "⏱ 24 hours", "tier": "Free"},
-    "Basic_1h": {"interval": 3600,  "hy": "⏱ 1 ժամ", "ru": "⏱ 1 час",   "en": "⏱ 1 hour",   "tier": "Basic"},
-    "Premium_30m": {"interval": 1800, "hy": "⏱ 30 րոպե", "ru": "⏱ 30 минут", "en": "⏱ 30 min", "tier": "Premium"},
-    "Ultra_15m": {"interval": 900,  "hy": "⏱ 15 րոպե", "ru": "⏱ 15 минут", "en": "⏱ 15 min", "tier": "Ultra"},
+    "Free_6h":    {"interval": 21600, "hy": "⏱ 6 ժամ",  "ru": "⏱ 6 часов",  "en": "⏱ 6 hours",  "tier": "Free"},
+    "Free_12h":   {"interval": 43200, "hy": "⏱ 12 ժամ", "ru": "⏱ 12 часов","en": "⏱ 12 hours", "tier": "Free"},
+    "Free_24h":   {"interval": 86400, "hy": "⏱ 24 ժամ", "ru": "⏱ 24 часа", "en": "⏱ 24 hours", "tier": "Free"},
+    "Basic_1h":   {"interval": 3600,  "hy": "⏱ 1 ժամ",  "ru": "⏱ 1 час",   "en": "⏱ 1 hour",   "tier": "Basic"},
+    "Premium_30m":{"interval": 1800,  "hy": "⏱ 30 րոպե","ru": "⏱ 30 минут","en": "⏱ 30 min", "tier": "Premium"},
+    "Ultra_15m":  {"interval": 900,   "hy": "⏱ 15 րոպե","ru": "⏱ 15 минут","en": "⏱ 15 min", "tier": "Ultra"},
 }
 TIER_ORDER = ["Free", "Basic", "Premium", "Ultra"]
+paid_levels = {"Basic", "Premium", "Ultra"}
+premium_tiers = {
+    option_name: {
+        "interval": option_data["interval"],
+        "label": {  # Можно сразу собрать метки на трех языках
+            "hy": option_data["hy"],
+            "ru": option_data["ru"],
+            "en": option_data["en"],
+        },
+        "tier": option_data["tier"],
+        # Если позже понадобится цена — можно добавить сюда поле "price_cents" или "price_dram"
+    }
+    for option_name, option_data in FREQUENCY_OPTIONS.items()
+    if option_data["tier"] in paid_levels
+}
 
 # --- КОНФИГУРАЦИЯ ---
 @dataclass
@@ -1021,6 +1035,33 @@ async def get_sound_settings_inline_keyboard(user_id_str: str, context: ContextT
     return InlineKeyboardMarkup(keyboard)
 
 
+async def show_help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Обработчик команды /help — выводит подробную справку из translations.help_text_detailed
+    """
+    handler_data = get_bot_data(context)
+    user = update.effective_user
+    lang = get_lang_for_handler(context, user.id)
+    help_text = handler_data.translations.get("help_text_detailed", {}).get(
+        lang,
+        # Если перевод не найден, можно использовать подсказку по умолчанию:
+        "Доступные команды:\n"
+        "/start — Запустить бота и выбрать язык.\n"
+        "/language — Изменить язык интерфейса.\n"
+        "/myaddresses — Показать сохранённые адреса.\n"
+        "/stats — Показать статистику.\n"
+        "/help — Показать эту подсказку.\n"
+        "/sound — Настройки звука.\n"
+        "/set_frequency — Изменить частоту проверок.\n"
+        "\n"
+        "Админские команды:\n"
+        "/maintenance_on — Включить режим обслуживания.\n"
+        "/maintenance_off — Выключить режим обслуживания."
+    )
+
+    await update.message.reply_text(help_text)
+
+
 @handler_prechecks
 async def handle_text_message_new_logic(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user # Гарантированно есть
@@ -1170,6 +1211,7 @@ async def handle_text_message_new_logic(update: Update, context: ContextTypes.DE
         # ... (логика удаления, затем reply_with_main_menu) ...
         address_to_remove_text = text
         user_addrs = handler_data.user_addresses.get(user_id, [])
+        
         # ... (логика поиска и удаления, как в предыдущих версиях)
         # ... если удалено:
         # await save_tracked_data_async(context)
@@ -1338,6 +1380,105 @@ async def periodic_site_check_job(context: ContextTypes.DEFAULT_TYPE):
     
     log_info(f"Periodic check done. Active: {active_checks} / {len(user_ids_to_check)} eligible.")
 
+
+async def handle_address_confirmation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Обработчик нажатий на кнопки подтверждения адреса (Да / Нет / Отмена) после
+    AI-кларификации. 
+    CALLBACK_PREFIX_ADDRESS_CONFIRM — префикс, который вы используете при создании callback_data,
+    например: f"{CALLBACK_PREFIX_ADDRESS_CONFIRM}yes", f"{CALLBACK_PREFIX_ADDRESS_CONFIRM}original", f"{CALLBACK_PREFIX_ADDRESS_CONFIRM}cancel_add".
+    """
+    query = update.callback_query
+    if not query:
+        return  # на всякий случай
+
+    await query.answer()  # закрываем «висящую» иконку ожидания
+
+    # Получаем код после префикса, например: "yes", "original" или "cancel_add"
+    data = query.data[len(CALLBACK_PREFIX_ADDRESS_CONFIRM):]
+
+    handler_data = get_bot_data(context)  # доступ к translations, user_addresses и т. д.
+    user_id = query.from_user.id
+    lang = get_lang_for_handler(context, user_id)
+
+    if data == "yes":
+        # Пользователь согласился с вариантом ИИ.
+        clarified = context.user_data.get(USER_DATA_CLARIFIED_ADDRESS_CACHE)
+        if clarified:
+            # Пример: сохраняем в handler_data.user_addresses
+            region = context.user_data.get(USER_DATA_SELECTED_REGION)
+            street_full = " ".join(filter(None, [
+                clarified.get("street_type", ""),
+                clarified.get("street_name", ""),
+                clarified.get("house_number", "")
+            ])).strip()
+
+            # Проверяем дубликаты:
+            user_addrs = handler_data.user_addresses.setdefault(user_id, [])
+            is_duplicate = any(
+                normalize_address_component(addr["street"]) == normalize_address_component(street_full) and
+                normalize_address_component(addr["region"]) == normalize_address_component(region)
+                for addr in user_addrs
+            )
+            if is_duplicate:
+                await query.edit_message_text(
+                    handler_data.translations.get("address_exists", {}).get(lang, "Address already exists."),
+                    reply_markup=reply_markup_for_lang(lang, context)
+                )
+            else:
+                user_addrs.append({"region": region, "street": street_full})
+                await save_tracked_data_async(context)
+                await query.edit_message_text(
+                    handler_data.translations.get("address_added", {}).get(lang, "Address added."),
+                    reply_markup=reply_markup_for_lang(lang, context)
+                )
+        else:
+            # На всякий случай, если кэша нет
+            await query.edit_message_text(
+                handler_data.translations.get("error_ai_cache_missing", {}).get(lang, "Error: no AI data."),
+                reply_markup=reply_markup_for_lang(lang, context)
+            )
+
+    elif data == "original":
+        # Пользователь выбрал «Сохранить то, что ввёл самостоятельно» (игнорируем подсказку ИИ).
+        raw_street = context.user_data.get(USER_DATA_RAW_STREET_INPUT)
+        region = context.user_data.get(USER_DATA_SELECTED_REGION)
+        if raw_street and region:
+            user_addrs = handler_data.user_addresses.setdefault(user_id, [])
+            is_duplicate = any(
+                normalize_address_component(addr["street"]) == normalize_address_component(raw_street) and
+                normalize_address_component(addr["region"]) == normalize_address_component(region)
+                for addr in user_addrs
+            )
+            if is_duplicate:
+                await query.edit_message_text(
+                    handler_data.translations.get("address_exists", {}).get(lang, "Address already exists."),
+                    reply_markup=reply_markup_for_lang(lang, context)
+                )
+            else:
+                user_addrs.append({"region": region, "street": raw_street})
+                await save_tracked_data_async(context)
+                await query.edit_message_text(
+                    handler_data.translations.get("address_added", {}).get(lang, "Address added."),
+                    reply_markup=reply_markup_for_lang(lang, context)
+                )
+        else:
+            await query.edit_message_text(
+                handler_data.translations.get("error_missing_data", {}).get(lang, "Error: missing data."),
+                reply_markup=reply_markup_for_lang(lang, context)
+            )
+
+    else:  # data == "cancel_add" или любой другой непредусмотренный
+        # Возвращаемся в главное меню без сохранения
+        await query.edit_message_text(
+            handler_data.translations.get("action_cancelled", {}).get(lang, "Action cancelled."),
+            reply_markup=reply_markup_for_lang(lang, context)
+        )
+
+    # После любой ветки сбрасываем шаг пользователя:
+    context.user_data[USER_DATA_STEP] = UserSteps.NONE.name
+
+
 # --- ХУКИ ИНИЦИАЛИЗАЦИИ И ЗАВЕРШЕНИЯ ---
 async def post_init_hook(application: Application):
     log_info("Bot post_init_hook: Загрузка данных...")
@@ -1389,7 +1530,9 @@ async def set_bot_commands_async(application: Application):
             for admin_id in bot_cfg.admin_user_ids:
                 try: await application.bot.set_my_commands(commands + admin_commands, scope={"type": "chat", "chat_id": admin_id})
                 except Exception as e_admin_cmd: log_error(f"Ошибка установки админ-команд для {admin_id}: {e_admin_cmd}")
+
         log_info("Команды бота установлены.")
+
     except Exception as e: log_error(f"Ошибка установки команд бота: {e}", exc_info=True)
 
 # --- ТОЧКА ВХОДА ---
@@ -1416,10 +1559,10 @@ def main():
     application_builder = ApplicationBuilder().token(config.telegram_token)
     application_builder.persistence(ptb_persistence)
     application_builder.post_init(post_init_hook)
-    application_builder.post_shutdown(post_shutdown_hook) # Изменено на post_
-    application_builder.bot_data(initial_bot_shared_data)
+    application_builder.post_shutdown(post_shutdown_hook)
     application = application_builder.build()
     log_info("Application built.")
+    application.bot_data.update(initial_bot_shared_data)
 
     # Регистрация обработчиков
     # Команды
@@ -1430,19 +1573,13 @@ def main():
     application.add_handler(CommandHandler("help", show_help_command)) # TODO: Реализовать show_help_command
     application.add_handler(CommandHandler("sound", sound_settings_command)) 
     application.add_handler(CommandHandler("set_frequency", set_frequency_command_entry))
-
-    # Админские команды
     application.add_handler(CommandHandler("maintenance_on", maintenance_on_command))
     application.add_handler(CommandHandler("maintenance_off", maintenance_off_command))
 
-    # CallbackQuery Handlers
     application.add_handler(CallbackQueryHandler(handle_language_callback, pattern=f"^{CALLBACK_PREFIX_LANG}"))
     application.add_handler(CallbackQueryHandler(handle_subscription_callback, pattern=f"^{CALLBACK_PREFIX_SUBSCRIBE}"))
     application.add_handler(CallbackQueryHandler(handle_address_confirmation_callback, pattern=f"^{CALLBACK_PREFIX_ADDRESS_CONFIRM}")) #TODO: handle_address_confirmation_callback
-    application.add_handler(CallbackQueryHandler(handle_sound_settings_callback, pattern=f"^{CALLBACK_PREFIX_SOUND}"))
-    # TODO: application.add_handler(CallbackQueryHandler(handle_help_action_callback, pattern=f"^{CALLBACK_PREFIX_HELP}"))
-
-    # Message Handler (должен быть одним из последних)
+    application.add_handler(CallbackQueryHandler(handle_sound_settings_callback, pattern=f"^{CALLBACK_PREFIX_SOUND}")) # TODO: application.add_handler(CallbackQueryHandler(handle_help_action_callback, pattern=f"^{CALLBACK_PREFIX_HELP}"))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message_new_logic))
     
     job_q: Optional[JobQueue] = application.job_queue
