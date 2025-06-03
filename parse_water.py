@@ -7,144 +7,144 @@ from datetime import datetime, timedelta
 from ai_engine import structure_text_with_ai_async, is_ai_available # Assuming this is correctly set up
 from logger import log_error, log_info, log_warning # Assuming this is correctly set up
 
-ELECTRIC_URL = "https://www.ena.am/Info.aspx?id=5&lang=1" # lang=1 Armenian
+WATER_URL = "https://interactive.vjur.am/"
 
-async def fetch_electric_announcements_async() -> list[str]:
-    log_info(f"Fetching electric announcements from {ELECTRIC_URL} (async)...")
+PROMPT_TEMPLATE_WATER = f"""
+You are an AI assistant specialized in extracting information about water outages in Armenia from text.
+The text is from the Veolia Jur website.
+Extract the following fields from the provided text. If a field is not present, use null or an empty string.
+Format dates and times as "YYYY-MM-DD HH:MM". Calculate duration if possible.
+
+Fields to extract:
+- "publication_date_on_site": Date and time the announcement was found/published (use "{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}" if not in text and no other date available).
+- "shutdown_type": Type of shutdown (e.g., "planned", "emergency", "профилактическое", "аварийное", "պլանային", "վթարային"). If not specified, try to infer or use "unknown".
+- "start_datetime": Start date and time of the outage (e.g., "2024-07-15 10:00").
+- "end_datetime": End date and time of the outage (e.g., "2024-07-15 18:00").
+- "duration_hours": Calculated duration of the outage in hours. If start and end are present, calculate it.
+- "reason": Reason for the outage if specified (e.g., "maintenance", "repair", "профилактические работы", "аварийно-восстановительные работы").
+- "locations": A list of affected locations. Each location object should have:
+    - "region": (e.g., "Շենգավիթ", "Кентрон", "Shengavit")
+    - "city_district": (e.g., "Նոր Նորք", "Арабкир")
+    - "street_address": Full street address including building numbers, house numbers if available (e.g., "ք. Երևան, Նոր Նորքի 2-րդ զանգ.՝ Գայի պող. 10/1, 10/2, 12/1, 12/2, 14/1 շենքեր")
+- "source_url": The URL from which this information was extracted (use "{WATER_URL}").
+- "additional_info": Any other relevant information not fitting other fields.
+- "contact_info": Any contact numbers or information provided.
+
+Output the result as a single JSON object.
+"""
+
+async def fetch_water_announcements_async() -> list[str]:
+    log_info(f"Fetching water announcements from {WATER_URL} (async)...")
     raw_texts = []
     try:
-        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client: # Increased timeout, added follow_redirects
-            response = await client.get(ELECTRIC_URL)
+        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client: # Increased timeout
+            response = await client.get(WATER_URL)
             response.raise_for_status()
             
             soup = BeautifulSoup(response.text, 'html.parser')
             
-            # 1. Planned Outages
-            # User: "текст плановых отключений начинается с <span id="ctl00_ContentPlaceHolder1_attenbody"> до </span>"
-            planned_outages_span = soup.find('span', id='ctl00_ContentPlaceHolder1_attenbody')
-            if planned_outages_span:
-                planned_text = planned_outages_span.get_text(separator='\n', strip=True)
-                if planned_text:
-                    raw_texts.append(planned_text)
-                    log_info("Extracted planned electricity outage text.")
-                else:
-                    log_warning("Planned outage span ctl00_ContentPlaceHolder1_attenbody found but was empty.")
-            else:
-                log_warning("Planned electricity outage span (ctl00_ContentPlaceHolder1_attenbody) not found.")
-
-            # 2. Emergency Outages
-            # User: "блок аварийных отключений это список в конце страницы. Начинается с старых адресов, до новых."
-            # "Последняя кнопка ... это список последних отключений. Нужно перейти, чтобы отобразилось."
-            # NB: httpx cannot click buttons or execute JS for pagination. This will only get the initially loaded table data.
-            emergency_table = soup.find('table', id='ctl00_ContentPlaceHolder1_vtarayin')
-            if emergency_table:
-                log_info("Found emergency electricity outage table (ctl00_ContentPlaceHolder1_vtarayin). Parsing rows...")
-                log_warning("Emergency electricity outages: Only parsing the currently visible page due to static fetching limitations. Full data might require JS execution for pagination.")
-                
-                rows = emergency_table.select('tbody tr')
-                if not rows: # Fallback if tbody is not explicitly there or rows are direct children of table
-                    rows = emergency_table.select('tr')
-
-                announcements_in_table = 0
-                for row in rows:
-                    cells = row.find_all(['td', 'th']) # Include th just in case headers are mixed or for robustness
-                    row_texts = [cell.get_text(strip=True) for cell in cells]
-                    if any(text for text in row_texts): # Ensure row is not empty
-                        # Concatenate cell texts to form a single "document" for the AI
-                        # The AI will need to be trained/prompted to understand this structure
-                        # Example: "Date | Time | Region | Street | Status"
-                        raw_texts.append(" | ".join(filter(None, row_texts)))
-                        announcements_in_table +=1
-                if announcements_in_table > 0:
-                    log_info(f"Extracted {announcements_in_table} emergency outage rows from the table.")
-                else:
-                    log_warning("Emergency outage table found, but no data rows were extracted. Structure might have changed or table is empty.")
-            else:
-                log_warning("Emergency electricity outage table (ctl00_ContentPlaceHolder1_vtarayin) not found.")
+            # User: "уведомления находятся и начинаются с <div class="items"> до </div>"
+            # Based on Water.html, the actual text is within panel-body inside items.
+            # Example: <div class="items"> ... <div class="panel panel-danger/info..."> <div class="panel-body"> TEXT </div> </div> ... </div>
             
+            # Corrected selector to find all panel-body divs within the div.items container
+            announcement_container = soup.find('div', class_='items')
+            if announcement_container:
+                announcement_panels = announcement_container.select('div.panel div.panel-body')
+                if announcement_panels:
+                    for panel_body in announcement_panels:
+                        text_content = panel_body.get_text(separator='\n', strip=True)
+                        if text_content: # Ensure there's actual text
+                            raw_texts.append(text_content)
+                    log_info(f"Extracted {len(raw_texts)} water announcement texts using 'div.items div.panel div.panel-body'.")
+                else:
+                    log_warning(f"Container 'div.items' found, but no 'div.panel div.panel-body' found within it at {WATER_URL}.")
+            else:
+                # Fallback or alternative selector if 'div.items' is not found or for different structures.
+                # The previous script used 'div.panel.panel-info', this is now incorporated above more generally.
+                # If 'div.items' is crucial and not found, it's a significant page change.
+                log_warning(f"Main announcement container 'div.items' not found at {WATER_URL}. Page structure might have changed.")
+
             if not raw_texts:
-                log_warning(f"No electric announcement texts extracted from {ELECTRIC_URL}. Check selectors and page structure.")
+                log_warning(f"No water announcement texts extracted from {WATER_URL}. Check selectors and page structure.")
 
     except httpx.HTTPStatusError as e:
-        log_error(f"HTTP error fetching electric announcements: {e.response.status_code} for {e.request.url}", exc=e)
+        log_error(f"HTTP error fetching water announcements: {e.response.status_code} for {e.request.url}", exc=e)
         return []
     except httpx.RequestError as e:
-        log_error(f"Request error fetching electric announcements: {e}", exc=e)
+        log_error(f"Request error fetching water announcements: {e}", exc=e)
         return []
     except Exception as e:
-        log_error(f"General error fetching electric announcements: {e}", exc=e)
+        log_error(f"General error fetching water announcements: {e}", exc=e)
         return []
-    
-    log_info(f"Finished fetching electric announcements. Total texts extracted: {len(raw_texts)}")
+        
+    log_info(f"Finished fetching water announcements. Total texts extracted: {len(raw_texts)}")
     return raw_texts
 
-async def extract_electric_info_async(text_content: str) -> dict:
+async def extract_water_info_async(text_content: str) -> dict:
     if not await is_ai_available():
-        log_warning("AI service is not available. Skipping electric info extraction.")
+        log_warning("AI service is not available. Skipping water info extraction.")
         return {"error": "AI service unavailable", "original_text": text_content}
-    # The prompt should be designed to handle both planned text blocks and structured " | " separated table rows.
-    # This might require two different prompts or a very robust single prompt.
-    # For simplicity, assuming a robust PROMPT_TEMPLATE_ELECTRIC exists or is configured in ai_engine.
-    prompt_template = "Extract structured outage information from the following Armenian electricity announcement. The text might be a general announcement or a table row with fields separated by '|'. Fields to extract: publication_date_on_site, shutdown_type (planned/emergency), start_datetime, end_datetime, duration_hours, region, city_district, street_address, additional_info. Format dates as YYYY-MM-DD HH:MM. If it's a general announcement, capture the overall message. If it's a table row, interpret the columns appropriately. Current date for reference if publication date is missing: " + datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
     try:
-        structured_data = await structure_text_with_ai_async(text_content, prompt_template, "electric")
+        # Using the PROMPT_TEMPLATE_WATER defined at the top of this file
+        structured_data = await structure_text_with_ai_async(text_content, PROMPT_TEMPLATE_WATER, "water")
+        
         if not structured_data:
-            log_warning(f"AI returned no data for electric text. Text: {text_content[:100]}...")
+            log_warning(f"AI returned no data for water text. Text: {text_content[:100]}...")
             return {"error": "AI returned no data", "original_text_snippet": text_content[:100]}
-        
-        # Basic validation or transformation can be added here if needed
-        structured_data["source_type"] = "electric"
-        structured_data["original_text_snippet"] = text_content[:150] # Add snippet for logging/debugging
+
+        # Add source URL and type if not already there from AI (though prompt asks for it)
+        structured_data["source_url"] = WATER_URL
+        structured_data["source_type"] = "water"
+        structured_data["original_text_snippet"] = text_content[:150]
+
+        # Example of post-processing AI output if necessary:
+        # if "start_datetime" in structured_data and isinstance(structured_data["start_datetime"], str):
+        #     # Attempt to parse and reformat, or validate
+        #     pass 
         return structured_data
-        
+
+    except json.JSONDecodeError as je: # If AI output is not valid JSON (though structure_text_with_ai_async should handle this)
+        log_error(f"Failed to decode JSON from AI for water: {je}. Raw output: AI_OUTPUT_WAS_HERE", exc=je) # Be careful logging raw output if sensitive
+        return {"error": f"AI output JSON decode error: {je}", "original_text_snippet": text_content[:100]}
     except Exception as e:
-        log_error(f"Error structuring electric text with AI: {e}. Text: {text_content[:100]}...", exc=e)
+        log_error(f"Error structuring water text with AI: {e}. Text: {text_content[:100]}...", exc=e)
         return {"error": f"AI processing failed: {e}", "original_text_snippet": text_content[:100]}
 
-async def parse_all_electric_announcements_async() -> list[dict]:
-    log_info("Starting parse_all_electric_announcements_async...")
-    texts = await fetch_electric_announcements_async()
+async def parse_all_water_announcements_async() -> list[dict]:
+    log_info("Starting parse_all_water_announcements_async...")
+    texts = await fetch_water_announcements_async()
     if not texts:
-        log_info("No electric announcement texts fetched.")
+        log_info("No water announcement texts fetched.")
         return []
 
-    log_info(f"Fetched {len(texts)} electric texts. Starting AI extraction...")
-    
-    # Consider rate limiting if AI service has limits
-    tasks = [extract_electric_info_async(t) for t in texts]
+    log_info(f"Fetched {len(texts)} water texts. Starting AI extraction with AI...")
+    tasks = [extract_water_info_async(t) for t in texts]
     results = await asyncio.gather(*tasks, return_exceptions=True)
     
     final_results = []
     for i, res in enumerate(results):
-        if isinstance(res, dict) and "error" not in res and res:
+        if isinstance(res, dict) and "error" not in res and res: # Ensure it's a dict, no error, and not empty
             final_results.append(res)
         elif isinstance(res, Exception):
-            log_error(f"Exception during electric info extraction task for text index {i}: {res}", exc=res)
+            log_error(f"Exception during water info extraction task {i+1}: {res}", exc=res)
         elif isinstance(res, dict) and "error" in res:
-            log_warning(f"AI or processing error for electric text index {i}: {res.get('error')}. Original snippet: {res.get('original_text_snippet', texts[i][:70])}")
+             log_warning(f"AI or processing error for water text {i+1}. Error: {res.get('error', 'Unknown AI error')}. Original snippet: {res.get('original_text_snippet', texts[i][:100] if i < len(texts) else 'N/A')}")
         else:
-            text_snippet = texts[i][:70].replace('\n', ' ') if i < len(texts) else "N/A"
-            log_warning(f"Empty or unexpected result from electric info extraction for text index {i}. Original text snippet: {text_snippet}")
+            log_warning(f"Empty or unexpected result from water info extraction for text {i+1}. Result: {res}. Original snippet: {texts[i][:100] if i < len(texts) else 'N/A'}")     
             
-    log_info(f"ELECTRIC announcements processed. Extracted valid data for {len(final_results)} out of {len(texts)} texts.")
+    log_info(f"WATER announcements processed. Extracted valid data for {len(final_results)} out of {len(texts)} texts.")
     return final_results
 
 # Example usage (optional, for testing)
 # if __name__ == '__main__':
 #     async def main():
-#         # Mock ai_engine for local testing if needed
-#         # global is_ai_available, structure_text_with_ai_async
-#         # async def mock_is_ai_available(): return True
-#         # async def mock_structure_text_with_ai_async(text, prompt, type): 
-#         #     print(f"Mock AI processing {type} text: {text[:50]}...")
-#         #     return {"mock_data": text[:50]}
-#         # is_ai_available = mock_is_ai_available
-#         # structure_text_with_ai_async = mock_structure_text_with_ai_async
-#         results = await parse_all_electric_announcements_async()
+#         results = await parse_all_water_announcements_async()
 #         if results:
-#             print(f"Successfully parsed {len(results)} electric announcements:")
+#             print(f"Successfully parsed {len(results)} water announcements:")
 #             for item in results:
 #                 print(json.dumps(item, ensure_ascii=False, indent=2))
 #         else:
-#             print("No electric announcements parsed.")
+#             print("No water announcements parsed.")
 #     asyncio.run(main())
