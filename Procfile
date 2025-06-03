@@ -1,1 +1,1 @@
-worker: python smart_bot.py
+worker: pip install -r requirements.txt && python smart_bot.py
