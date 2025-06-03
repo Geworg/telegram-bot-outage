@@ -1,27 +1,26 @@
-# parse_gas.py
 import asyncio
 import httpx
 from bs4 import BeautifulSoup
 import json
-import re # Добавлен импорт re
-from ai_engine import ask_model
+import re
+from datetime import datetime, timedelta
+from ai_engine import structure_text_with_ai_async, is_ai_available
 from logger import log_error, log_info, log_warning
 
-# URL для Газпром Армения (аварийные и плановые)
-GAS_URL_VTAR = "https://armenia-am.gazprom.com/notice/announcement/vtar/" # Аварийные
-GAS_URL_PLAN = "https://armenia-am.gazprom.com/notice/announcement/plan/" # Плановые
+GAS_URL_VTAR = "https://armenia-am.gazprom.com/notice/announcement/vtar/"
+GAS_URL_PLAN = "https://armenia-am.gazprom.com/notice/announcement/plan/"
 
 async def fetch_gas_announcements_async() -> list[str]:
     log_info("Fetching gas announcements (async)...")
     raw_texts = []
-    urls_to_fetch = [GAS_URL_VTAR, GAS_URL_PLAN] # Список URL для парсинга
+    urls_to_fetch = [GAS_URL_VTAR, GAS_URL_PLAN]
 
     try:
         async with httpx.AsyncClient(timeout=20.0) as client:
             for url in urls_to_fetch:
                 log_info(f"Fetching from {url}...")
                 response = await client.get(url)
-                response.raise_for_status() # Проверка на HTTP ошибки
+                response.raise_for_status()
                 
                 soup = BeautifulSoup(response.text, 'html.parser')
                 # Селектор для Газпрома, может потребовать адаптации
@@ -148,3 +147,4 @@ async def parse_all_gas_announcements_async() -> list[dict]:
                 
     log_info(f"Total gas announcements successfully processed into JSON: {len(final_results)} (out of {len(texts_with_sources)} fetched raw texts)")
     return final_results
+    

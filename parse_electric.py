@@ -1,13 +1,12 @@
-# parse_electric.py
 import asyncio
 import httpx
 from bs4 import BeautifulSoup
 import json
-import re # Добавлен импорт re
-from ai_engine import ask_model
+import re
+from datetime import datetime, timedelta
+from ai_engine import structure_text_with_ai_async, is_ai_available
 from logger import log_error, log_info, log_warning
 
-# URL для Электросетей Армении
 ELECTRIC_URL = "https://www.ena.am/Info.aspx?id=5&lang=1" # lang=1 это армянский, lang=2 русский, lang=3 английский
 
 async def fetch_electric_announcements_async() -> list[str]:
@@ -139,3 +138,4 @@ async def parse_all_electric_announcements_async() -> list[dict]:
             
     log_info(f"Total electric announcements successfully processed into JSON: {len(final_results)} (out of {len(texts)} fetched raw texts)")
     return final_results
+    

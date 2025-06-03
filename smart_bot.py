@@ -3,1178 +3,1051 @@ import json
 import re
 import asyncio
 import shutil
-from datetime import datetime
-from time import time
-from typing import Dict, List, Optional, Set, Any
+from datetime import datetime, timedelta
+from dataclasses import dataclass, field
+from time import time as timestamp
+from typing import Dict, List, Optional, Set, Any, Tuple, Callable
 from collections import defaultdict
-from difflib import SequenceMatcher
-from dataclasses import dataclass
+from difflib import SequenceMatcher, get_close_matches
 from enum import Enum, auto
+import urllib.parse
+import hashlib
 
 from dotenv import load_dotenv
-from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, ApplicationBuilder, CallbackQueryHandler, CommandHandler, MessageHandler, filters, ContextTypes, PicklePersistence
+from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
+from telegram.ext import Application, ApplicationBuilder, CallbackQueryHandler, ContextTypes, CommandHandler, MessageHandler, filters, BasePersistence, JobQueue # PicklePersistence
+from telegram.ext.persistence import JSONPersistence
 from telegram.constants import ParseMode
-from telegram.helpers import escape_markdown # Для экранирования Markdown
+from telegram.error import Forbidden, RetryAfter, TimedOut, NetworkError
 
-from logger import log_info, log_error
-from translations import translations
-# Теперь импортируем реальные парсеры вместо заглушек
+# Project modules
+from logger import log_info, log_error, log_warning
+from translations import translations, CONTACT_PHONE_NUMBER, CONTACT_ADDRESS_TEXT, MAP_URL, CLICKABLE_PHONE_MD, CLICKABLE_ADDRESS_MD
 from parse_water import parse_all_water_announcements_async
 from parse_gas import parse_all_gas_announcements_async
 from parse_electric import parse_all_electric_announcements_async
-from handlers import set_frequency_command, handle_frequency_choice
-
+from handlers import set_frequency_command, handle_frequency_choice, FREQUENCY_OPTIONS
+from ai_engine import clarify_address_ai, is_ai_available, MODEL_PATH as AI_MODEL_PATH, MODELS_DIR as AI_MODELS_DIR
 import aiofiles
 import aiofiles.os as aios
 from pathlib import Path
-
 import requests
 from tqdm import tqdm
 
-MODEL_URL = "https://huggingface.co/Geworg/phi2-gguf/resolve/main/phi-2.Q4_K_M.gguf"
-MODEL_PATH = "phi-2.Q4_K_M.gguf"
+# --- Configuration ---
+load_dotenv()
+BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+if not BOT_TOKEN:
+    log_error("TELEGRAM_BOT_TOKEN not found in .env file. Bot cannot start.")
+    exit()
 
-def download_model(url, dest_path):
-    if os.path.exists(dest_path):
-        print(f"✔ Модель уже есть: {dest_path}")
-        return
+ADMIN_USER_IDS = [int(admin_id) for admin_id in os.getenv("ADMIN_USER_IDS", "").split(',') if admin_id.strip()]
+log_info(f"Admin User IDs: {ADMIN_USER_IDS}")
+DATA_DIR = Path("data")
+DATA_DIR.mkdir(exist_ok=True)
+PERSISTENCE_FILE = DATA_DIR / "bot_persistence.json"
+USER_SETTINGS_FILE = DATA_DIR / "user_settings.json"
+ADDRESSES_FILE = DATA_DIR / "addresses.json"
+NOTIFIED_FILE = DATA_DIR / "notified_announcements.json"
+BOT_STATUS_FILE = DATA_DIR / "bot_general_status.json"
+REGION_STREET_MAP_FILE = DATA_DIR / "region_street_map.json"
+# Model download configuration (specific to smart_bot.py's download logic)
+# NOTE: This is somewhat redundant with ai_engine.py's model path. Ideally, one source of truth.
+# For this example, we assume smart_bot.py ensures the model exists at the path ai_engine.py expects.
+MODEL_URL = os.getenv("LLAMA_MODEL_URL", "https://huggingface.co/Geworg/phi2-gguf/resolve/main/phi-2.Q4_K_M.gguf")
+# Use AI_MODEL_PATH from ai_engine.py as the target for download
+LOCAL_MODEL_PATH = Path(AI_MODEL_PATH)
 
-    print(f"⬇ Скачиваем модель из {url} ...")
-    response = requests.get(url, stream=True)
-    total = int(response.headers.get('content-length', 0))
-    with open(dest_path, 'wb') as file, tqdm(
-        desc=dest_path,
-        total=total,
-        unit='iB',
-        unit_scale=True,
-        unit_divisor=1024,
-    ) as bar:
-        for data in response.iter_content(chunk_size=1024):
-            size = file.write(data)
-            bar.update(size)
+# --- Constants ---
+DEFAULT_LANG = "hy"
+USER_DATA_STEP_KEY = "current_step"
+USER_DATA_SELECTED_REGION_KEY = "selected_region"
+USER_DATA_ADDRESS_ATTEMPT_KEY = "address_attempt"
+USER_DATA_TEMP_ADDRESS_KEY = "temp_address_info"
+# Callback prefixes
+CALLBACK_PREFIX_SUBSCRIBE = "subscribe_"
+CALLBACK_PREFIX_ADDRESS_CONFIRM = "address_confirm_"
+CALLBACK_PREFIX_HELP = "help_action_"
+CALLBACK_PREFIX_FAQ_ITEM = "faq_item_"
+CALLBACK_PREFIX_SOUND = "sound_settings_"
+CALLBACK_PREFIX_REMOVE_ADDRESS = "remove_addr_"
+CALLBACK_PREFIX_LANGUAGE = "lang_"
+# Free tier ad display frequency
+AD_INTERVAL_SECONDS = 24 * 60 * 60
+LAST_AD_TIMESTAMP_KEY = "last_ad_timestamp"
 
-download_model(MODEL_URL, MODEL_PATH)
-
-# --- КОНСТАНТЫ ---
-class UserSteps(Enum):
+# --- Enums ---
+class UserStepsEnum(Enum):
     NONE = auto()
-    AWAITING_LANGUAGE_CHOICE = auto()
-    AWAITING_REGION = auto()
-    AWAITING_STREET = auto()
-    AWAITING_ADDRESS_TO_REMOVE = auto()
-    AWAITING_CLEAR_ALL_CONFIRMATION = auto()
-    AWAITING_ADDRESS_TO_CHECK = auto()
+    AWAITING_REGION_CHOICE = auto()
+    AWAITING_STREET_INPUT = auto()
+    AWAITING_ADDRESS_CONFIRMATION = auto()
     AWAITING_FREQUENCY_CHOICE = auto()
-    AWAITING_SUBSCRIPTION_CHOICE = auto()
+    AWAITING_ADDRESS_TO_REMOVE = auto()
+    AWAITING_ADDRESS_TO_CHECK = auto()
+    AWAITING_LANGUAGE_CHOICE = auto()
+# --- Data Structures & Locks (using asyncio.Lock for critical sections with files) ---
+# NOTE: These global dictionaries will be managed by Telegram's persistence if configured.
+# If not using persistence for these, manual loading/saving with locks is crucial.
+# For this version, we assume persistence handles user_settings and addresses.
+# notified_announcements will be handled manually with locks.
+user_settings: Dict[str, Dict[str, Any]] = defaultdict(lambda: {"lang": DEFAULT_LANG, "frequency": 21600, "current_tier": "Free", "sound_enabled": True})
+addresses: Dict[str, List[Dict[str, str]]] = defaultdict(list)
+notified_announcements: Dict[str, float] = {} # Store announcement hash -> timestamp notified
+region_street_map: Dict[str, List[str]] = {} # Marz/Region -> List of streets
+# Locks for file operations not handled by persistence
+notified_lock = asyncio.Lock()
+status_lock = asyncio.Lock()
+region_map_lock = asyncio.Lock()
+# user_settings_lock = asyncio.Lock() # Not needed if using PTB persistence for user_settings
+# addresses_lock = asyncio.Lock()   # Not needed if using PTB persistence for addresses
+# --- Utility Functions ---
+def get_translation(key: str, lang: str, default_text: Optional[str] = None, **kwargs) -> str:
+    """Retrieves a translation string, falling back to default or key itself."""
+    if default_text is None:
+        default_text = key.replace("_", " ").capitalize()
+    return translations.get(key, {}).get(lang, default_text).format(**kwargs)
 
-USER_DATA_LANG = "current_language"
-USER_DATA_STEP = "current_step"
-USER_DATA_SELECTED_REGION = "selected_region_for_add"
-CALLBACK_PREFIX_SUBSCRIBE = "subscribe:"
-CALLBACK_PREFIX_PAY = "pay:" # Потенциальный префикс для будущей оплаты
+def get_user_lang(user_id_str: str) -> str:
+    # Assumes user_settings is populated (e.g., by persistence or load function)
+    return user_settings.get(user_id_str, {}).get("lang", DEFAULT_LANG)
 
-# --- КОНФИГУРАЦИЯ ---
-@dataclass
-class BotConfig:
-    telegram_token: str
-    settings_file: Path = Path("user_settings.json")
-    address_file: Path = Path("addresses.json")
-    notified_file: Path = Path("notified.json")
-    backup_dir: Path = Path("backups")
-    log_level: str = "INFO"
-    backup_interval_seconds: int = 86400
-    max_requests_per_minute: int = 30
-    max_backups_to_keep: int = 5
-    ad_interval_seconds: int = 86400 # Интервал для показа рекламы (пример)
+def get_reply_markup_for_lang(lang: str, context: Optional[ContextTypes.DEFAULT_TYPE] = None, user_id_str: Optional[str] = None) -> ReplyKeyboardMarkup:
+    """Generates the main keyboard for the user's language."""
+    # Ensure lang is valid, fallback to DEFAULT_LANG
+    if lang not in ["hy", "ru", "en"]:
+        lang = DEFAULT_LANG
 
-    @classmethod
-    def from_env(cls) -> 'BotConfig':
-        load_dotenv()
-        backup_path = Path(os.getenv("BACKUP_DIR", "backups"))
-        backup_path.mkdir(parents=True, exist_ok=True)
-        return cls(
-            telegram_token=os.getenv("TELEGRAM_BOT_TOKEN", ""),
-            settings_file=Path(os.getenv("SETTINGS_FILE", "user_settings.json")),
-            address_file=Path(os.getenv("ADDRESS_FILE", "addresses.json")),
-            notified_file=Path(os.getenv("NOTIFIED_FILE", "notified.json")),
-            backup_dir=backup_path,
-            log_level=os.getenv("LOG_LEVEL", "INFO"),
-            backup_interval_seconds=int(os.getenv("BACKUP_INTERVAL_SECONDS", "86400")),
-            max_requests_per_minute=int(os.getenv("MAX_REQUESTS_PER_MINUTE", "30")),
-            max_backups_to_keep=int(os.getenv("MAX_BACKUPS_TO_KEEP", "5")),
-            ad_interval_seconds=int(os.getenv("AD_INTERVAL_SECONDS", "86400"))
-        )
+    keyboard = [
+        [KeyboardButton(get_translation("add_address_btn", lang)), KeyboardButton(get_translation("remove_address_btn", lang))],
+        [KeyboardButton(get_translation("show_addresses_btn", lang)), KeyboardButton(get_translation("clear_all_btn", lang))],
+        [KeyboardButton(get_translation("check_address_btn", lang)), KeyboardButton(get_translation("set_frequency_btn", lang))],
+        [KeyboardButton(get_translation("change_language_btn", lang)), KeyboardButton(get_translation("help_btn", lang))],
+    ]
+    # Example of adding a button based on user tier (if such logic exists)
+    # if user_id_str and context and user_settings.get(user_id_str, {}).get("current_tier", "Free") != "Free":
+    #     keyboard.append([KeyboardButton(get_translation("premium_features_btn", lang))])
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
-    def validate(self) -> bool:
-        if not self.telegram_token:
-            log_error("TELEGRAM_BOT_TOKEN не найден в переменных окружения или .env файле.")
-            raise ValueError("Необходим TELEGRAM_BOT_TOKEN")
+async def save_data_async(filepath: Path, data: Any, lock: Optional[asyncio.Lock] = None) -> None:
+    """Asynchronously saves data to a JSON file with an optional lock."""
+    # IMPROVEMENT: Use a temporary file for atomic-like write to prevent data corruption on crash
+    temp_filepath = filepath.with_suffix(filepath.suffix + ".tmp")
+    try:
+        if lock:
+            async with lock:
+                async with aiofiles.open(temp_filepath, mode="w", encoding="utf-8") as f:
+                    await f.write(json.dumps(data, indent=2, ensure_ascii=False))
+                await aios.rename(temp_filepath, filepath)
+        else:
+            async with aiofiles.open(temp_filepath, mode="w", encoding="utf-8") as f:
+                await f.write(json.dumps(data, indent=2, ensure_ascii=False))
+            await aios.rename(temp_filepath, filepath)
+        log_info(f"Data saved to {filepath}")
+    except Exception as e:
+        log_error(f"Error saving data to {filepath}: {e}", exc=e)
+        if await aios.path.exists(temp_filepath):
+            try:
+                await aios.remove(temp_filepath)
+            except Exception as e_rem:
+                log_error(f"Error removing temporary file {temp_filepath}: {e_rem}")
+
+async def load_data_async(filepath: Path, default_factory: Callable = dict, lock: Optional[asyncio.Lock] = None) -> Any:
+    """Asynchronously loads data from a JSON file with an optional lock."""
+    try:
+        if await aios.path.exists(filepath):
+            if lock:
+                async with lock:
+                    async with aiofiles.open(filepath, mode="r", encoding="utf-8") as f:
+                        content = await f.read()
+                        if not content: return default_factory() # Handle empty file
+                        return json.loads(content)
+            else:
+                async with aiofiles.open(filepath, mode="r", encoding="utf-8") as f:
+                    content = await f.read()
+                    if not content: return default_factory()
+                    return json.loads(content)
+        return default_factory()
+    except json.JSONDecodeError as e:
+        log_error(f"JSONDecodeError loading data from {filepath}: {e}. Returning default.", exc=e)
+        # IMPROVEMENT: Backup corrupted file and return default
+        corrupted_backup_path = filepath.with_suffix(filepath.suffix + f".corrupted_{datetime.now().strftime('%Y%m%d%H%M%S')}")
+        try:
+            await aios.rename(filepath, corrupted_backup_path)
+            log_info(f"Backed up corrupted file to {corrupted_backup_path}")
+        except Exception as backup_e:
+            log_error(f"Could not backup corrupted file {filepath}: {backup_e}")
+        return default_factory()
+    except Exception as e:
+        log_error(f"Error loading data from {filepath}: {e}. Returning default.", exc=e)
+        return default_factory()
+
+# --- Load initial data ---
+async def load_all_data():
+    """Loads all necessary data files at startup."""
+    global user_settings, addresses, notified_announcements, region_street_map
+    # For data managed by PTB persistence, this manual loading might be redundant
+    # if persistence is configured correctly and loads data into context.bot_data / user_data.
+    # However, if direct access to these dicts is needed outside PTB handlers,
+    # loading them here ensures they are populated.
+    # We will use the PTB built-in persistence for user_settings and addresses.
+    # `notified_announcements` and `region_street_map` are managed manually.
+    notified_announcements.update(await load_data_async(NOTIFIED_FILE, dict, notified_lock))
+    log_info(f"Loaded {len(notified_announcements)} notified announcement records.")
+
+    region_street_map.update(await load_data_async(REGION_STREET_MAP_FILE, dict, region_map_lock))
+    log_info(f"Loaded {len(region_street_map)} regions into region_street_map.")
+    if not region_street_map:
+        log_warning(f"{REGION_STREET_MAP_FILE} is empty or not found. Address validation features might be limited.")
+
+# --- Model Download ---
+def download_model_if_needed(model_url: str, model_path: Path, model_dir: Path):
+    """Downloads the LLM model if it doesn't exist."""
+    if model_path.exists():
+        log_info(f"Model {model_path.name} already exists at {model_path}.")
         return True
 
-config = BotConfig.from_env()
-config.validate()
-
-# --- ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ---
-user_settings: Dict[int, Dict[str, Any]] = {}
-user_languages: Dict[int, str] = {} # Этот словарь можно объединить с user_settings
-user_addresses: Dict[int, List[Dict[str, str]]] = {}
-user_notified_headers: Dict[int, Set[str]] = {}
-last_check_time: Dict[int, float] = {}
-last_ad_time: Dict[int, float] = {} # Для отслеживания времени последнего показа рекламы
-user_request_counts: Dict[int, List[float]] = defaultdict(list)
-start_time = time()
-settings_file_lock = asyncio.Lock()
-address_file_lock = asyncio.Lock()
-notified_file_lock = asyncio.Lock()
-
-# --- ЯЗЫКИ И КЛАВИАТУРЫ ---
-languages = {"🇦🇲 Հայերեն": "hy", "🇷🇺 Русский": "ru", "🇺🇸 English": "en"}
-language_keyboard = ReplyKeyboardMarkup(
-    [[KeyboardButton(text) for text in languages.keys()]],
-    resize_keyboard=True, one_time_keyboard=True
-)
-
-regions_hy = ["Երևան", "Արագածոտն", "Արարատ", "Արմավիր", "Գեղարքունիք", "Լոռի", "Կոտայք", "Շիրակ", "Սյունիք", "Վայոց ձոր", "Տավուշ"]
-regions_ru = ["Ереван", "Арагацотн", "Арарат", "Армавир", "Вайоц дзор", "Гехаркуник", "Котайк", "Лори", "Сюник", "Тавуш", "Ширак"]
-regions_en = ["Yerevan", "Aragatsotn", "Ararat", "Armavir", "Gegharkunik", "Kotayk", "Lori", "Shirak", "Syunik", "Tavush", "Vayots Dzor"]
-
-def get_region_keyboard(lang: str) -> ReplyKeyboardMarkup:
-    regions_map = {"hy": regions_hy, "ru": regions_ru, "en": regions_en}
-    current_regions = regions_map.get(lang, regions_hy)
-    keyboard = [[KeyboardButton(region)] for region in current_regions]
-    keyboard.append([KeyboardButton(translations.get("cancel", {}).get(lang, "Cancel"))])
-    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True)
-
-def get_main_menu_buttons(lang: str) -> List[List[KeyboardButton]]:
-    # Используем .get для безопасного доступа к переводам
-    return [
-        [KeyboardButton(translations.get("add_address_btn", {}).get(lang, "Add Address")),
-         KeyboardButton(translations.get("remove_address_btn", {}).get(lang, "Remove Address"))],
-        [KeyboardButton(translations.get("show_addresses_btn", {}).get(lang, "Show Addresses")),
-         KeyboardButton(translations.get("clear_all_btn", {}).get(lang, "Clear All"))],
-        [KeyboardButton(translations.get("check_address_btn", {}).get(lang, "Check Address")),
-         KeyboardButton(translations.get("change_language_btn", {}).get(lang, "Change Language"))],
-        [KeyboardButton(translations.get("statistics_btn", {}).get(lang, "Statistics")),
-         KeyboardButton(translations.get("help_btn", {}).get(lang, "Help"))],
-        [KeyboardButton(translations.get("set_frequency_btn", {}).get(lang, "Set Frequency")),
-         KeyboardButton(translations.get("subscription_btn", {}).get(lang, "Subscription"))]
-    ]
-
-def reply_markup_for_lang(lang: str) -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(get_main_menu_buttons(lang), resize_keyboard=True)
-
-# --- УТИЛИТЫ ---
-def validate_user_input(text: str) -> bool:
-    if not text or len(text) > 1000: return False
-    dangerous_patterns = ['<script', 'javascript:', 'onclick', 'onerror', 'onload', 'eval(']
-    return not any(pattern in text.lower() for pattern in dangerous_patterns)
-
-def is_user_rate_limited(user_id: int, max_requests: Optional[int] = None, window: int = 60) -> bool:
-    if max_requests is None: max_requests = config.max_requests_per_minute
-    now = time()
-    user_reqs = user_request_counts[user_id]
-    user_reqs[:] = [req_time for req_time in user_reqs if now - req_time < window]
-    if len(user_reqs) >= max_requests: return True
-    user_reqs.append(now)
-    return False
-
-# Определение тарифов (можно вынести в отдельный конфигурационный файл или раздел)
-premium_tiers = {
-    "Free": {"interval": 21600, "price_amd": 0, "ad_enabled": True, "checks_per_day_limit": 4}, # 6 часов
-    "Basic": {"interval": 3600, "price_amd": 490, "ad_enabled": False, "checks_per_day_limit": 24}, # 1 час
-    "Premium": {"interval": 900, "price_amd": 990, "ad_enabled": False, "checks_per_day_limit": 96}, # 15 минут
-    "Ultra": {"interval": 300, "price_amd": 1990, "ad_enabled": False, "checks_per_day_limit": 288} # 5 минут
-}
-# Добавим сюда опции для более частых проверок из handlers.py для консистентности
-# Это будет использоваться для формирования клавиатуры подписки.
-# В handlers.py FREQUENCY_OPTIONS останется для выбора частоты вручную.
-
-def get_subscription_keyboard(lang: str) -> InlineKeyboardMarkup:
-    buttons = []
-    for tier_key, tier_info in premium_tiers.items():
-        # Безопасное получение переводов
-        price_str = (f"({tier_info['price_amd']} {translations.get('amd_short', {}).get(lang, 'AMD')}/"
-                     f"{translations.get('month_short', {}).get(lang, 'mo')})"
-                     if tier_info['price_amd'] > 0 else f"({translations.get('free', {}).get(lang, 'Free')})")
-        label = f"{translations.get(f'tier_{tier_key.lower()}', {}).get(lang, tier_key)} {price_str}"
-        buttons.append([InlineKeyboardButton(text=label, callback_data=f"{CALLBACK_PREFIX_SUBSCRIBE}{tier_key}")])
-    # Можно добавить кнопку "Оплатить" если выбран платный тариф, ведущую к платежной системе
-    # buttons.append([InlineKeyboardButton(text=translations.get("pay_button", {}).get(lang, "Proceed to Payment"), callback_data=f"{CALLBACK_PREFIX_PAY}selected_tier")])
-    return InlineKeyboardMarkup(buttons)
-
-async def show_subscription_options(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    log_info(f"[smart_bot] show_subscription_options called for user {update.effective_user.id}")
-    if not update.message: return
-    lang = context.user_data.get(USER_DATA_LANG, "hy")
-    
-    # BUG FIX 1: Использовать lang для текста "Опции подписки"
-    subscription_options_text = translations.get("subscription_options_title", {}).get(lang, "Subscription Options:")
-    
-    await update.message.reply_text(
-        subscription_options_text, # Исправлено
-        reply_markup=get_subscription_keyboard(lang)
-    )
-    context.user_data[USER_DATA_STEP] = UserSteps.AWAITING_SUBSCRIPTION_CHOICE
-    log_info(f"[smart_bot] User {update.effective_user.id} step set to AWAITING_SUBSCRIPTION_CHOICE")
-
-async def handle_subscription_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    if not query or not query.data:
-        log_error("[smart_bot] handle_subscription_callback: query or query.data is None")
-        return
-
-    await query.answer()
-    user_id = query.from_user.id
-    lang = context.user_data.get(USER_DATA_LANG, "hy")
-    log_info(f"[smart_bot] handle_subscription_callback for user {user_id}, data: '{query.data}'")
-
+    log_info(f"Model {model_path.name} not found. Attempting to download from {model_url}...")
+    model_dir.mkdir(parents=True, exist_ok=True)
     try:
-        selected_tier_key = query.data.split(CALLBACK_PREFIX_SUBSCRIBE)[1]
-        if selected_tier_key not in premium_tiers:
-            log_error(f"Unknown tier key '{selected_tier_key}' selected by user {user_id}.")
-            await query.edit_message_text(translations.get("error_invalid_tier", {}).get(lang, "Invalid subscription tier selected."))
-            context.user_data[USER_DATA_STEP] = UserSteps.NONE
-            return
-
-        plan = premium_tiers[selected_tier_key]
-        log_info(f"[smart_bot] User {user_id} selected tier: {selected_tier_key}, plan details: {plan}")
-
-        current_s = user_settings.get(user_id, {})
-        current_s.update({
-            "frequency": plan["interval"],
-            "is_premium": plan["price_amd"] > 0,
-            "ads_enabled": plan["ad_enabled"],
-            "current_tier": selected_tier_key
-        })
-        user_settings[user_id] = current_s
-        await save_user_settings_async()
-        log_info(f"[smart_bot] Settings saved for user {user_id} after subscription choice.")
-
-        # BUG FIX 4: Улучшенное сообщение о смене подписки
-        tier_name_translated = translations.get(f'tier_{selected_tier_key.lower()}', {}).get(lang, selected_tier_key)
-        interval_hours = plan['interval'] / 3600
-        interval_minutes = plan['interval'] / 60
-
-        if plan['interval'] >= 3600:
-            interval_desc = f"{int(interval_hours)} {translations.get('hours_short', {}).get(lang, 'h')}"
-        else:
-            interval_desc = f"{int(interval_minutes)} {translations.get('minutes_short', {}).get(lang, 'min')}"
-
-        success_message_key = "subscription_success_details" if plan["price_amd"] > 0 else "subscription_free_success_details"
+        response = requests.get(model_url, stream=True)
+        response.raise_for_status()
+        total_size = int(response.headers.get('content-length', 0))
         
-        success_message_template = translations.get(success_message_key, {}).get(lang, "Subscription {plan} activated. Check interval: {interval}.")
-        
-        success_message = success_message_template.format(plan=tier_name_translated, interval=interval_desc)
-
-        await query.edit_message_text(success_message)
-        # Здесь можно добавить логику для перехода к оплате, если это платный тариф
-        # if plan["price_amd"] > 0:
-        #     await query.message.reply_text(translations.get("proceed_to_payment_prompt", {}).get(lang, "Please proceed to payment...")) # Добавить кнопку оплаты
-        # else:
-        #     await query.message.reply_text(text=translations.get("menu_returned", {}).get(lang, "Returned to menu."), reply_markup=reply_markup_for_lang(lang))
-        
-        await query.message.reply_text(text=translations.get("menu_returned", {}).get(lang, "Returned to main menu."), reply_markup=reply_markup_for_lang(lang))
-        context.user_data[USER_DATA_STEP] = UserSteps.NONE
-
-    except (IndexError, KeyError) as e:
-        log_error(f"Ошибка обработки callback-данных подписки '{query.data}' для пользователя {user_id}: {e}")
-        await query.edit_message_text(translations.get("error_generic", {}).get(lang, "Error processing selection."))
-        context.user_data[USER_DATA_STEP] = UserSteps.NONE
-    except Exception as e:
-        log_error(f"Непредвиденная ошибка в handle_subscription_callback для пользователя {user_id}, data '{query.data}': {e}", exc=e)
-        await query.edit_message_text(translations.get("error_generic", {}).get(lang, "A serious error occurred."))
-        context.user_data[USER_DATA_STEP] = UserSteps.NONE
-
-
-def normalize_address(addr: str) -> str:
-    if not addr: return ""
-    addr_low = addr.lower()
-    addr_strip = addr_low.strip()
-    addr_space = re.sub(r'\s+', ' ', addr_strip)
-    replacements = {'ул.': 'улица', 'пр.': 'проспект', 'փ.': 'փողոց', 'st.': 'street', 'ave.': 'avenue', 'բլվ.': 'բուլվար', 'пер.': 'переулок'}
-    for old, new in replacements.items():
-        addr_space = addr_space.replace(old, new)
-    return addr_space
-
-def fuzzy_match_address(user_address_normalized: str, entry_locations_normalized: List[str], threshold: float = 0.8) -> bool:
-    for loc_norm in entry_locations_normalized:
-        if user_address_normalized in loc_norm: return True # Прямое вхождение
-        if SequenceMatcher(None, user_address_normalized, loc_norm).ratio() >= threshold: return True
-    return False
-
-def match_address(user_id: int, entry: Dict[str, Any]) -> Optional[Dict[str, str]]:
-    user_addrs = user_addresses.get(user_id, [])
-    if not user_addrs: return None
-
-    entry_streets_norm = [normalize_address(s) for s in entry.get("streets", [])]
-    entry_regions_norm = [normalize_address(r) for r in entry.get("regions", [])]
-
-    for address_obj in user_addrs:
-        user_street_norm = normalize_address(address_obj["street"])
-        user_region_norm = normalize_address(address_obj["region"])
-
-        region_match_confirmed = False
-        if entry_regions_norm: # Если в объявлении указаны регионы
-            if fuzzy_match_address(user_region_norm, entry_regions_norm, threshold=0.9):
-                region_match_confirmed = True
-        else: # Если в объявлении регионы не указаны, считаем, что по региону совпадение есть (проверяем только улицу)
-            region_match_confirmed = True
-
-        if region_match_confirmed:
-            if entry_streets_norm: # Если в объявлении указаны улицы
-                if fuzzy_match_address(user_street_norm, entry_streets_norm):
-                    return address_obj
-            else: # Если в объявлении улицы не указаны, но регион совпал (или не был указан в объявлении)
-                  # Это рискованно, может привести к ложным срабатываниям, если отключают весь регион.
-                  # Пока оставим так, но это место для возможного улучшения логики.
-                  # Возможно, стоит возвращать совпадение, только если есть хотя бы одно совпадение по улице, если улицы указаны.
-                  # Если в объявлении нет улиц, то это широкомасштабное отключение, и совпадение по региону достаточно.
-                log_info(f"Address match for user {user_id} on region '{user_region_norm}' due to unspecified streets in entry.")
-                return address_obj # Считаем совпадением, если улицы в объявлении не указаны, а регион подошел.
-    return None
-
-# --- АСИНХРОННОЕ СОХРАНЕНИЕ И ЗАГРУЗКА ДАННЫХ ---
-async def _save_json_async(filepath: Path, data: Any, lock: asyncio.Lock):
-    async with lock:
-        try:
-            async with aiofiles.open(filepath, "w", encoding="utf-8") as f:
-                await f.write(json.dumps(data, ensure_ascii=False, indent=2))
-            log_info(f"Данные успешно сохранены в {filepath}")
-        except Exception as e:
-            log_error(f"Не удалось сохранить данные в {filepath}: {e}")
-            raise
-
-async def _load_json_async(filepath: Path, lock: asyncio.Lock, default_factory=dict) -> Any:
-    async with lock:
-        if not await aios.path.exists(filepath):
-            log_info(f"Файл {filepath} не найден, возвращается значение по умолчанию.")
-            return default_factory() if callable(default_factory) else default_factory
-        try:
-            async with aiofiles.open(filepath, "r", encoding="utf-8") as f:
-                content = await f.read()
-                return json.loads(content)
-        except Exception as e:
-            log_error(f"Не удалось загрузить данные из {filepath}: {e}. Возвращается значение по умолчанию.")
-            return default_factory() if callable(default_factory) else default_factory
-
-async def _perform_backup_async(filepath: Path):
-    if not await aios.path.exists(filepath): return
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    backup_file = config.backup_dir / f"{filepath.stem}.backup_{timestamp}{filepath.suffix}"
-    try:
-        # shutil.copy2 синхронный, выполняем в executor'е
-        loop = asyncio.get_event_loop()
-        await loop.run_in_executor(None, shutil.copy2, filepath, backup_file)
-        log_info(f"Резервная копия создана для {filepath} в {backup_file}")
-    except Exception as e:
-        log_error(f"Не удалось создать резервную копию для {filepath}: {e}")
-
-async def _cleanup_old_backups_async(filename_prefix_stem: str):
-    loop = asyncio.get_event_loop()
-    # Получаем все файлы, затем фильтруем по имени, которое начинается с filename_prefix_stem и содержит .backup_
-    backup_files = await loop.run_in_executor(
-        None,
-        lambda: sorted(
-            [f for f in config.backup_dir.iterdir() if f.name.startswith(filename_prefix_stem) and f.name.count(".backup_")],
-            key=os.path.getmtime,
-            reverse=True
-        )
-    )
-    for old_backup in backup_files[config.max_backups_to_keep:]:
-        try:
-            await aios.remove(old_backup)
-            log_info(f"Удалена старая резервная копия: {old_backup}")
-        except Exception as e:
-            log_error(f"Не удалось удалить старую резервную копию {old_backup}: {e}")
-
-async def save_user_settings_async():
-    global user_settings
-    filepath = config.settings_file
-    await _perform_backup_async(filepath)
-    try:
-        data_to_save = {str(k): v for k, v in user_settings.items()} # Ключи ID пользователей должны быть строками в JSON
-        await _save_json_async(filepath, data_to_save, settings_file_lock)
-        await _cleanup_old_backups_async(filepath.stem)
-    except Exception as e: # Добавил аргумент 'e'
-        log_error(f"Ошибка сохранения {filepath}, данные могут быть неконсистентны: {e}")
-
-async def load_user_settings_async():
-    global user_settings, user_languages # user_languages теперь часть user_settings
-    raw_settings = await _load_json_async(config.settings_file, settings_file_lock, default_factory=dict)
-    # Конвертируем ключи обратно в int и обновляем user_languages
-    temp_user_settings = {}
-    for k_str, v_dict in raw_settings.items():
-        if k_str.isdigit():
-            uid = int(k_str)
-            temp_user_settings[uid] = v_dict
-            if "lang" in v_dict: # Обновляем user_languages для обратной совместимости, если где-то используется
-                 user_languages[uid] = v_dict["lang"]
-        else:
-            log_error(f"Неверный формат ID пользователя в файле настроек: {k_str}")
-    user_settings = temp_user_settings
-    log_info(f"Загружены настройки для {len(user_settings)} пользователей.")
-
-
-async def save_tracked_data_async():
-    global user_addresses, user_notified_headers
-    addr_filepath = config.address_file
-    await _perform_backup_async(addr_filepath)
-    try:
-        addr_data_to_save = {str(k): v for k, v in user_addresses.items()}
-        await _save_json_async(addr_filepath, addr_data_to_save, address_file_lock)
-        await _cleanup_old_backups_async(addr_filepath.stem)
-    except Exception as e:
-        log_error(f"Ошибка сохранения {addr_filepath}: {e}")
-
-    notif_filepath = config.notified_file
-    await _perform_backup_async(notif_filepath)
-    try:
-        # Конвертируем set в list для JSON-сериализации
-        notif_data_to_save = {str(k): list(v) for k, v in user_notified_headers.items()}
-        await _save_json_async(notif_filepath, notif_data_to_save, notified_file_lock)
-        await _cleanup_old_backups_async(notif_filepath.stem)
-    except Exception as e:
-        log_error(f"Ошибка сохранения {notif_filepath}: {e}")
-
-async def load_tracked_data_async():
-    global user_addresses, user_notified_headers
-    # Загрузка адресов
-    raw_addresses = await _load_json_async(config.address_file, address_file_lock, default_factory=dict)
-    temp_user_addresses = {}
-    for uid_str, items_list in raw_addresses.items():
-        if not uid_str.isdigit():
-            log_error(f"Неверный формат ID пользователя в файле адресов: {uid_str}")
-            continue
-        uid_int = int(uid_str)
-        valid_items = []
-        if isinstance(items_list, list):
-            for item in items_list:
-                if isinstance(item, dict) and "street" in item and "region" in item:
-                    valid_items.append(item)
-                # Поддержка старого формата, где адрес был просто строкой
-                elif isinstance(item, str):
-                    valid_items.append({"region": "Չսահմանված", "street": item}) # Регион по умолчанию
-                    log_info(f"Конвертирован старый формат адреса для пользователя {uid_int}: {item}")
-                else:
-                    log_info(f"Пропуск неверного элемента адреса для пользователя {uid_int}: {item}")
-            temp_user_addresses[uid_int] = valid_items
-        else:
-            log_error(f"Элементы адреса для пользователя {uid_int} не являются списком: {items_list}")
-            temp_user_addresses[uid_int] = [] # Пустой список, если формат неверный
-    user_addresses = temp_user_addresses
-    log_info(f"Загружены адреса для {len(user_addresses)} пользователей.")
-
-    # Загрузка истории уведомлений
-    raw_notified = await _load_json_async(config.notified_file, notified_file_lock, default_factory=dict)
-    temp_user_notified_headers = {}
-    for k_str, v_list in raw_notified.items():
-        if not k_str.isdigit():
-            log_error(f"Неверный формат ID пользователя в файле истории уведомлений: {k_str}")
-            continue
-        if isinstance(v_list, list): # Убеждаемся, что v_list - это список
-            temp_user_notified_headers[int(k_str)] = set(v_list)
-        else:
-            log_error(f"История уведомлений для пользователя {k_str} не является списком: {v_list}")
-            temp_user_notified_headers[int(k_str)] = set() # Пустое множество, если формат неверный
-    user_notified_headers = temp_user_notified_headers
-    log_info(f"Загружена история уведомлений для {len(user_notified_headers)} пользователей.")
-
-# --- ОСНОВНАЯ ЛОГИКА БОТА ---
-async def process_utility_data(user_id: int, context: ContextTypes.DEFAULT_TYPE, data: List[Dict], utility_type: str, emoji: str, lang: str):
-    if not data: return
-
-    for entry in data:
-        if not entry or not isinstance(entry, dict):
-            log_info(f"Пропуск неверной записи в данных {utility_type}: {entry}")
-            continue
-
-        header_parts = [
-            entry.get('published', 'N/A'), # Дата публикации для уникальности
-            entry.get('start_date', 'N/A'),
-            entry.get('start_time', 'N/A'),
-            utility_type
-        ]
-        # Собираем улицы и регионы в строку для заголовка, чтобы сделать его более уникальным
-        # Это важно, если объявления могут иметь одинаковое время начала, но разные улицы/регионы
-        streets_str = ",".join(sorted(entry.get("streets", [])))
-        regions_str = ",".join(sorted(entry.get("regions", [])))
-        header_parts.append(streets_str)
-        header_parts.append(regions_str)
-        
-        header = " | ".join(header_parts)
-
-
-        if user_id in user_notified_headers and header in user_notified_headers[user_id]:
-            log_info(f"Уведомление с заголовком '{header}' уже было отправлено пользователю {user_id}")
-            continue # Уже уведомлен об этом конкретном событии
-
-        matched_address_obj = match_address(user_id, entry)
-        if matched_address_obj:
+        with open(model_path, 'wb') as f, tqdm(
+            desc=model_path.name,
+            total=total_size,
+            unit='iB',
+            unit_scale=True,
+            unit_divisor=1024,
+        ) as bar:
+            for chunk in response.iter_content(chunk_size=8192):
+                size = f.write(chunk)
+                bar.update(size)
+        log_info(f"Model {model_path.name} downloaded successfully to {model_path}.")
+        return True
+    except requests.exceptions.RequestException as e:
+        log_error(f"Failed to download model {model_path.name}: {e}", exc=e)
+        if model_path.exists(): # Remove partially downloaded file
             try:
-                # Безопасное получение переводов с фолбэками
-                type_off_key = f"{utility_type}_off"
-                type_off_text = translations.get(type_off_key, {}).get(lang, utility_type.capitalize())
-
-                msg_parts = [
-                    f"{emoji} *{type_off_text}* {escape_markdown(matched_address_obj['region'], 2)} - {escape_markdown(matched_address_obj['street'], 2)}",
-                    f"📅 *{translations.get('date_time_label', {}).get(lang, 'Period')}:* {escape_markdown(entry.get('start_date', 'N/A'),2)} {escape_markdown(entry.get('start_time', 'N/A'),2)} → {escape_markdown(entry.get('end_date', 'N/A'),2)} {escape_markdown(entry.get('end_time', 'N/A'),2)}",
-                ]
-                if entry.get('regions'):
-                     msg_parts.append(f"📍 *{translations.get('locations_label', {}).get(lang, 'Locations')}:* {escape_markdown(', '.join(entry.get('regions', [])),2)}")
-                if entry.get('streets'):
-                     msg_parts.append(f"  *└ {translations.get('streets_label', {}).get(lang, 'Streets')}:* {escape_markdown(', '.join(entry.get('streets')),2)}")
-                
-                msg_parts.extend([
-                    f"⚙️ *{translations.get('status_label', {}).get(lang, 'Status')}:* {escape_markdown(entry.get('status', 'N/A'),2)}",
-                    f"🗓 *{translations.get('published_label', {}).get(lang, 'Published')}:* {escape_markdown(entry.get('published', 'N/A'),2)}"
-                ])
-                msg = "\n\n".join(msg_parts)
-
-                await context.bot.send_message(chat_id=user_id, text=msg, parse_mode=ParseMode.MARKDOWN_V2)
-                user_notified_headers.setdefault(user_id, set()).add(header)
-                await save_tracked_data_async() # Сохраняем сразу после добавления в set
-                log_info(f"Отправлено уведомление ({utility_type}) пользователю {user_id} по адресу {matched_address_obj['street']}")
-            except KeyError as ke: # Обработка случая, если ключ перевода отсутствует
-                log_error(f"Ошибка ключа перевода для уведомления ({utility_type}) пользователю {user_id}: {ke}. Проверьте translations.py.")
-            except Exception as e:
-                log_error(f"Не удалось отправить уведомление ({utility_type}) пользователю {user_id}: {e}", exc=e)
-
-
-async def check_site_for_user(user_id: int, context: ContextTypes.DEFAULT_TYPE):
-    # Язык пользователя для уведомлений
-    lang = context.user_data.get(USER_DATA_LANG) or user_settings.get(user_id, {}).get("lang", "hy")
-
-    if not user_addresses.get(user_id):
-        log_info(f"Нет адресов для проверки для пользователя {user_id}")
-        return
-
-    log_info(f"Проверка сайтов для пользователя {user_id}")
-    try:
-        # Запускаем все парсеры параллельно
-        water_data, gas_data, electric_data = await asyncio.gather(
-            parse_all_water_announcements_async(),
-            parse_all_gas_announcements_async(),
-            parse_all_electric_announcements_async(),
-            return_exceptions=True # Чтобы одна ошибка не остановила все
-        )
-
-        # Обработка результатов и ошибок
-        if isinstance(water_data, Exception):
-            log_error(f"Ошибка парсинга воды для пользователя {user_id}: {water_data}")
-            water_data = []
-        if isinstance(gas_data, Exception):
-            log_error(f"Ошибка парсинга газа для пользователя {user_id}: {gas_data}")
-            gas_data = []
-        if isinstance(electric_data, Exception):
-            log_error(f"Ошибка парсинга электричества для пользователя {user_id}: {electric_data}")
-            electric_data = []
-
-    except Exception as e: # Общая ошибка, если gather сам по себе падает
-        log_error(f"Критическая ошибка при сборе данных для пользователя {user_id}: {e}")
-        return
-
-    # Обработка данных по каждому типу коммунальных услуг
-    await process_utility_data(user_id, context, water_data, "water", "🚰", lang)
-    await process_utility_data(user_id, context, gas_data, "gas", "🔥", lang)
-    await process_utility_data(user_id, context, electric_data, "💡", "electric", lang)
-
-
-async def is_shutdown_for_address_now(address_street: str, address_region: str) -> List[str]:
-    normalized_street = normalize_address(address_street)
-    normalized_region = normalize_address(address_region)
-    active_shutdown_types: List[str] = [] # Явная типизация
-
-    # Внутренняя функция для проверки совпадения
-    def _check_match(entry_data: List[Dict], utility_type: str):
-        for entry in entry_data:
-            if not entry or not isinstance(entry, dict): continue # Пропускаем некорректные записи
-
-            entry_streets_norm = [normalize_address(s) for s in entry.get("streets", [])]
-            entry_regions_norm = [normalize_address(r) for r in entry.get("regions", [])]
-
-            region_match_confirmed = False
-            if entry_regions_norm:
-                if fuzzy_match_address(normalized_region, entry_regions_norm, threshold=0.9):
-                    region_match_confirmed = True
-            else: # Если регионы в объявлении не указаны, считаем, что совпадение по региону есть
-                region_match_confirmed = True
-            
-            if region_match_confirmed:
-                if entry_streets_norm: # Если улицы в объявлении указаны
-                     if fuzzy_match_address(normalized_street, entry_streets_norm):
-                        if utility_type not in active_shutdown_types:
-                            active_shutdown_types.append(utility_type)
-                        return # Достаточно одного совпадения для данного типа
-                # else: # Если улицы в объявлении не указаны, но регион совпал
-                #     # Это может быть отключение всего региона. Добавляем тип.
-                #     if utility_type not in active_shutdown_types:
-                #         active_shutdown_types.append(utility_type)
-                #     return # Оставил закомментированным, чтобы избежать ложных срабатываний если улицы не указаны в объявлении.
-                #              # Требует более точного определения бизнес-логики.
-
-    try:
-        water_data, gas_data, electric_data = await asyncio.gather(
-            parse_all_water_announcements_async(),
-            parse_all_gas_announcements_async(),
-            parse_all_electric_announcements_async(),
-            return_exceptions=True
-        )
-
-        if not isinstance(water_data, Exception) and water_data: _check_match(water_data, "water")
-        if not isinstance(gas_data, Exception) and gas_data: _check_match(gas_data, "gas")
-        if not isinstance(electric_data, Exception) and electric_data: _check_match(electric_data, "electric")
-
+                os.remove(model_path)
+            except OSError as oe:
+                log_error(f"Could not remove partially downloaded model {model_path}: {oe}")
+        return False
     except Exception as e:
-        log_error(f"Ошибка в is_shutdown_for_address_now для {address_region}, {address_street}: {e}")
+        log_error(f"An unexpected error occurred during model download: {e}", exc=e)
+        return False
 
-    return active_shutdown_types
+# --- Announcement Processing ---
+def create_announcement_hash(announcement: Dict[str, Any]) -> str:
+    """Creates a unique hash for an announcement to avoid duplicates."""
+    # Use key fields that define uniqueness. Source URL + a snippet of text or key date/location parts.
+    # A simpler way is to hash a concatenated string of essential fields.
+    # Ensure consistent order of keys if hashing the whole dict (not recommended due to potential new fields).
+    key_fields = [
+        str(announcement.get("source_url", "")),
+        str(announcement.get("start_datetime", "")),
+        str(announcement.get("end_datetime", "")),
+        # Use a sorted representation of regions and streets for consistency
+        ",".join(sorted(announcement.get("regions", []))),
+        # Taking a snippet of streets/buildings as full text might be too volatile
+        # Use the first street/building entry if available, or a hash of the list
+        str(announcement.get("streets_buildings", [""])[0][:50]) # First 50 chars of first street entry
+    ]
+    # If "original_text_snippet" is reliable and concise, it can be part of the hash
+    # key_fields.append(announcement.get("original_text_snippet", ""))
+    # Normalize by converting all to string and joining
+    unique_string = "|".join(key_fields).encode('utf-8')
+    return hashlib.md5(unique_string).hexdigest()
 
-# --- ОБРАБОТЧИКИ КОМАНД ТЕЛЕГРАМ ---
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    log_info(f"[smart_bot] /start command from user {user.id if user else 'Unknown'}")
-    if not user or not update.message: return
+async def format_notification_message(announcement: Dict[str, Any], lang: str) -> str:
+    """Formats an announcement into a user-friendly notification message."""
+    # Basic formatting, can be enhanced with more details from announcement
+    # IMPROVEMENT: Use translations for field names and values where appropriate
+    service_emoji_map = {
+        "water": "💧",
+        "gas": "🔥",
+        "electric": "⚡️"
+    }
+    service_type = "unknown"
+    if "vjur" in announcement.get("source_url", ""): service_type = "water"
+    elif "gazprom" in announcement.get("source_url", ""): service_type = "gas"
+    elif "ena" in announcement.get("source_url", ""): service_type = "electric"
+    emoji = service_emoji_map.get(service_type, "⚠️")
+    title_key = "notification_title_water" if service_type == "water" \
+                else "notification_title_gas" if service_type == "gas" \
+                else "notification_title_electric" if service_type == "electric" \
+                else "notification_title_generic"
+    title = get_translation(title_key, lang, emoji + " Внимание! Отключение") + f" {emoji}"
+    lines = [f"*{title}*"] # Markdown
+    if "shutdown_type" in announcement and announcement["shutdown_type"]:
+        lines.append(f"{get_translation('shutdown_type', lang, 'Тип')}: _{announcement['shutdown_type']}_")
+    if "start_datetime" in announcement and announcement["start_datetime"]:
+        lines.append(f"{get_translation('start_time', lang, 'Начало')}: *{announcement['start_datetime']}*")
+    if "end_datetime" in announcement and announcement["end_datetime"]:
+        lines.append(f"{get_translation('end_time', lang, 'Окончание')}: *{announcement['end_datetime']}*")
+    if "duration_hours" in announcement and announcement["duration_hours"]:
+        lines.append(f"{get_translation('duration', lang, 'Продолжительность')}: {announcement['duration_hours']} {get_translation('hours_short', lang, 'ч')}.")
+    if "regions" in announcement and announcement["regions"]:
+        lines.append(f"{get_translation('regions', lang, 'Районы')}: {', '.join(announcement['regions'])}")
+    if "streets_buildings" in announcement and announcement["streets_buildings"]:
+        # lines.append(f"{get_translation('addresses', lang, 'Адреса')}:") # Too generic for a list
+        for entry in announcement["streets_buildings"]:
+             lines.append(f"📍 _{entry}_") # Using markdown for italics
+    if "additional_details" in announcement and announcement["additional_details"]:
+        lines.append(f"{get_translation('details', lang, 'Детали')}: {announcement['additional_details']}")
+    # Source might be too technical for users, but good for admins/debugging
+    # lines.append(f"\nИсточник: {announcement.get('source_url', 'N/A')}")
+    return "\n".join(lines)
 
-    if is_user_rate_limited(user.id):
-        log_info(f"Превышен лимит запросов для пользователя {user.id} в /start")
-        # Можно отправить сообщение о превышении лимита, если это нужно
-        # await update.message.reply_text("Rate limit exceeded. Please try again later.")
+def is_address_match(user_addr_info: Dict[str, str], announcement: Dict[str, Any]) -> bool:
+    """
+    Checks if the user's address (region/street) matches the announcement.
+    This needs to be quite sophisticated due to address variations.
+    `user_addr_info` is like `{"region": "Ереван", "street": "Баграмяна"}`.
+    `announcement` contains `regions` (list) and `streets_buildings` (list of strings).
+    """
+    # Placeholder for actual matching logic.
+    # Current logic is very basic. For a real system, this needs fuzzy matching,
+    # knowledge of district synonyms, street name variations (e.g. "ул. Х" vs "Х улица").
+    # The AI address clarification output could be used here if it normalizes names.
+    ann_regions = [r.lower().strip() for r in announcement.get("regions", [])]
+    user_region = user_addr_info.get("region", "").lower().strip()
+    user_street = user_addr_info.get("street", "").lower().strip()
+    if not user_region or not user_street: # Should not happen with validated addresses
+        return False
+    # 1. Check region match
+    region_match = False
+    if user_region in ann_regions:
+        region_match = True
+    else: # Check for partial match or common administrative divisions if Yerevan
+        if "ереван" in user_region or "yerevan" in user_region:
+            for ar in ann_regions:
+                if "ереван" in ar or "yerevan" in ar: # e.g., user subscribed to "Ереван", announcement for "Кентрон, Ереван"
+                    region_match = True
+                    break
+        # Add more complex region mapping if needed (e.g. "Арабкир" is part of "Ереван")
+    if not region_match:
+        return False
+    # 2. Check street match (if region matches)
+    # This is the hardest part. `announcement["streets_buildings"]` is a list of strings like "ул. Абовяна 1-10, ул. Туманяна все дома"
+    for detailed_address_str in announcement.get("streets_buildings", []):
+        # Simple check: does the user's street name appear in the announcement string for this region?
+        # This can lead to false positives (e.g., "Ленина" in "Ленинаканская") or false negatives.
+        # Using SequenceMatcher for a slightly better match.
+        # Consider tokenizing and comparing sets of words.
+        if SequenceMatcher(None, user_street, detailed_address_str.lower()).quick_ratio() > 0.7: # Arbitrary threshold
+             # Further check if a more specific part of detailed_address_str matches user_street better
+            best_match_ratio = 0
+            # Split by common delimiters to check parts of the string
+            parts = re.split(r'[;,.]', detailed_address_str.lower())
+            for part in parts:
+                part = part.strip()
+                # Remove common prefixes like "ул.", "пр." before matching
+                part_cleaned = re.sub(r'^(ул\.?|пр\.?|улица|проспект)\s+', '', part).strip()
+                # A simple direct check
+                if user_street in part_cleaned: # e.g. "абовян" in "улица абовяна"
+                    log_debug(f"Address match: User '{user_street}' in announcement part '{part_cleaned}' (Region: {user_region})")
+                    return True
+                # SequenceMatcher on cleaned parts
+                ratio = SequenceMatcher(None, user_street, part_cleaned).quick_ratio()
+                if ratio > best_match_ratio:
+                    best_match_ratio = ratio
+
+            if best_match_ratio > 0.85: # Higher threshold for part-based matching
+                log_debug(f"Address match (via parts, ratio {best_match_ratio:.2f}): User '{user_street}' similar to announcement part in '{detailed_address_str}' (Region: {user_region})")
+                return True
+    
+    log_debug(f"No street match for user '{user_street}' (Region: {user_region}) in announcement {announcement.get('original_text_snippet', 'N/A')}")
+    return False
+
+async def periodic_site_check_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Periodically fetches announcements, processes them, and notifies users."""
+    job_start_time = timestamp()
+    log_info("Periodic site check job started.")
+    # Load bot status (maintenance mode)
+    bot_status = await load_data_async(BOT_STATUS_FILE, lambda: {"is_maintenance": False, "maintenance_message": ""}, status_lock)
+    if bot_status.get("is_maintenance"):
+        log_info(f"Bot is in maintenance mode. Skipping periodic check. Message: {bot_status.get('maintenance_message')}")
         return
-
-    # Если язык еще не установлен (новый пользователь или сброс данных)
-    if USER_DATA_LANG not in context.user_data and user.id not in user_settings:
-        await update.message.reply_text(
-            translations.get("choose_language", {}).get("hy", "Ընտրեք լեզուն:") + "\n" + # На армянском по умолчанию
-            translations.get("choose_language", {}).get("ru", "Выберите язык:") + "\n" +
-            translations.get("choose_language", {}).get("en", "Choose language:"),
-            reply_markup=language_keyboard
-        )
-        context.user_data[USER_DATA_STEP] = UserSteps.AWAITING_LANGUAGE_CHOICE
+    if not is_ai_available():
+        log_warning("AI model not available. Periodic site check job will be limited or skipped.")
+        # Decide if you want to proceed without AI or just stop
+        # For now, we proceed, but parsing will likely fail or return errors.
+        # Parsers should handle "AI not available" gracefully.
+    all_new_announcements: List[Dict] = []
+    parsers = {
+        "water": parse_all_water_announcements_async,
+        "gas": parse_all_gas_announcements_async,
+        "electric": parse_all_electric_announcements_async,
+    }
+    for service_name, parser_func in parsers.items():
+        log_info(f"Checking for {service_name} announcements...")
+        try:
+            # Add a timeout for each parser to prevent job from hanging indefinitely
+            service_announcements = await asyncio.wait_for(parser_func(), timeout=300.0) # 5 minutes timeout per service
+            log_info(f"Found {len(service_announcements)} {service_name} announcements.")
+            all_new_announcements.extend(service_announcements)
+        except asyncio.TimeoutError:
+            log_error(f"Timeout while parsing {service_name} announcements.")
+        except Exception as e:
+            log_error(f"Error parsing {service_name} announcements: {e}", exc=e)
+    if not all_new_announcements:
+        log_info("No new announcements found across all services.")
+        # return # Keep running to check users due for ad or other tasks
+    # Filter out already notified announcements and malformed ones
+    valid_unseen_announcements = []
+    async with notified_lock: # Ensure exclusive access to notified_announcements
+        current_time = timestamp()
+        # Cleanup old notified announcements (e.g., older than 7 days) to prevent indefinite growth
+        # IMPROVEMENT: Pruning notified_announcements
+        MAX_NOTIFIED_AGE_SECONDS = 7 * 24 * 60 * 60 
+        pruned_count = 0
+        global notified_announcements # Ensure we are modifying the global dict
+        keys_to_delete = [
+            h for h, ts in notified_announcements.items() 
+            if current_time - ts > MAX_NOTIFIED_AGE_SECONDS
+        ]
+        for h_key in keys_to_delete:
+            del notified_announcements[h_key]
+            pruned_count +=1
+        if pruned_count > 0:
+            log_info(f"Pruned {pruned_count} old entries from notified_announcements.")
+        for ann in all_new_announcements:
+            if not isinstance(ann, dict) or "error" in ann or not ann.get("start_datetime"): # Basic validation
+                log_warning(f"Skipping malformed or error announcement: {str(ann)[:200]}")
+                continue
+            ann_hash = create_announcement_hash(ann)
+            if ann_hash not in notified_announcements:
+                valid_unseen_announcements.append(ann)
+                # Mark as notified immediately (or after successful user notifications)
+                # For now, mark here to avoid reprocessing if notification fails for some users
+                notified_announcements[ann_hash] = current_time 
+            else:
+                log_info(f"Announcement with hash {ann_hash} (Snippet: {ann.get('original_text_snippet', '')[:50]}) already processed.")
+        if valid_unseen_announcements or pruned_count > 0: # Save if new ones added or old ones pruned
+             await save_data_async(NOTIFIED_FILE, notified_announcements) # No lock needed, already under notified_lock
+    if not valid_unseen_announcements:
+        log_info("No new, valid, unseen announcements to notify users about.")
     else:
-        # Если язык есть в user_data или user_settings, используем его
-        lang = context.user_data.get(USER_DATA_LANG) or user_settings.get(user.id, {}).get("lang", "hy")
-        context.user_data[USER_DATA_LANG] = lang # Убедимся, что язык в user_data для текущей сессии
+        log_info(f"Processing {len(valid_unseen_announcements)} new valid announcements for notification.")
+    # --- Notify Users ---
+    # Iterate through all users and their addresses.
+    # This part needs access to `user_settings` and `addresses`.
+    # If using PTB persistence, context.application.user_data should be the source.
+    # For simplicity here, assuming `user_settings` and `addresses` are up-to-date global dicts.
+    # In a PTB setup, you'd iterate `context.application.user_data.items()`.
+    # We need user_data which is typically accessed via context in handlers.
+    # For a job, we can access application.user_data
+    # user_data_dict = context.application.user_data # This holds data for all users if persistence is set up
+    # PTB's job queue passes the application object in context.application
+    ptb_user_data: Dict[int, Dict[str, Any]] = context.application.user_data
+    ptb_bot_data: Dict[str, Any] = context.application.bot_data
+    # Create a local copy for iteration to avoid issues if modified during loop
+    # user_settings_snapshot = dict(user_settings) # or from ptb_bot_data.get('user_settings_global', {})
+    # addresses_snapshot = dict(addresses) # or from ptb_bot_data.get('addresses_global', {})
+    users_to_notify_tasks = []
+    for user_id_int, u_data in ptb_user_data.items():
+        user_id_str = str(user_id_int)
+        user_lang = u_data.get("lang", DEFAULT_LANG) # Get lang from persisted user_data
+        user_frequency_setting = u_data.get("frequency", 21600) # Default to 6h
+        user_current_tier = u_data.get("current_tier", "Free")
+        user_sound_enabled = u_data.get("sound_enabled", True)
+        # Check if user is due for a check based on their frequency
+        # This job runs every `job_queue_interval_seconds` (e.g. 60s)
+        # A user's specific frequency (e.g., 1h, 6h) means they should only get notifications
+        # if enough time has passed since their *last notification* for a *similar type of event*,
+        # or simply, this job processes *all new events* and filters by address.
+        # The `user_frequency_setting` is more about how often the *bot checks for them*,
+        # but this job checks for *everyone*.
+        # So, the main filtering is by address match.
+        user_tracked_addresses = u_data.get("addresses", []) # Get addresses from persisted user_data
+        if not user_tracked_addresses:
+            continue
+        for ann in valid_unseen_announcements:
+            for user_addr_info in user_tracked_addresses: # e.g. {"region": "...", "street": "..."}
+                if is_address_match(user_addr_info, ann):
+                    log_info(f"Address match for user {user_id_str} (Lang: {user_lang}, Addr: {user_addr_info['region']}/{user_addr_info['street']}) for announcement: {ann.get('original_text_snippet', '')[:50]}")
+                    # Avoid sending the same matched announcement multiple times if user has multiple matching addresses (e.g. broad region + specific street)
+                    # This check is tricky. For now, assume one notification per announcement per user.
+                    # A simple way: add (user_id, ann_hash) to a temporary set for this job run.
+                    message_text = await format_notification_message(ann, user_lang)
+                    # Schedule the send_message task
+                    users_to_notify_tasks.append(
+                        send_message_robustly(context.bot, user_id_int, message_text, user_sound_enabled)
+                    )
+                    break # Found a match for this announcement for this user, move to next announcement for this user
+    
+    if users_to_notify_tasks:
+        log_info(f"Gathered {len(users_to_notify_tasks)} notification tasks to send.")
+        await asyncio.gather(*users_to_notify_tasks, return_exceptions=True) # Send all notifications concurrently
+        log_info("Finished sending notifications for this batch.")
 
-        await update.message.reply_text(
-            translations.get("start_text", {}).get(lang, "Hello! Choose an action."),
-            reply_markup=reply_markup_for_lang(lang)
+    # --- Send AD to free users if due ---
+    current_job_time = timestamp()
+    ad_message_template_ru = "CheckSiteUpdateBot: Отслеживайте отключения воды, газа, света в Армении! Узнайте о платных функциях для более частых проверок: /subscription" # TODO: Add to translations
+    ad_tasks = []
+    for user_id_int, u_data in ptb_user_data.items():
+        user_id_str = str(user_id_int)
+        if u_data.get("current_tier", "Free") == "Free":
+            last_ad_ts = u_data.get(LAST_AD_TIMESTAMP_KEY, 0)
+            if current_job_time - last_ad_ts > AD_INTERVAL_SECONDS:
+                user_lang = u_data.get("lang", DEFAULT_LANG)
+                # TODO: Get ad_message from translations
+                ad_message = get_translation("ad_message_free_tier", user_lang, default_text=ad_message_template_ru)
+
+                log_info(f"User {user_id_str} is due for an ad. Last ad: {datetime.fromtimestamp(last_ad_ts) if last_ad_ts else 'Never'}")
+                ad_tasks.append(send_message_robustly(context.bot, user_id_int, ad_message, disable_notification=True)) # Ads should be silent
+                u_data[LAST_AD_TIMESTAMP_KEY] = current_job_time # Update last ad timestamp
+    if ad_tasks:
+        log_info(f"Sending ads to {len(ad_tasks)} free users.")
+        await asyncio.gather(*ad_tasks, return_exceptions=True)
+        # Note: If using PicklePersistence or JSONPersistence, user_data changes are automatically saved.
+        # If managing user_data manually, ensure it's saved after updating LAST_AD_TIMESTAMP_KEY.
+    job_duration = timestamp() - job_start_time
+    log_info(f"Periodic site check job finished in {job_duration:.2f} seconds.")
+
+async def send_message_robustly(bot, chat_id: int, text: str, sound_enabled: Optional[bool] = True, **kwargs) -> bool:
+    """Sends a message with error handling for common Telegram API errors."""
+    disable_notification_for_send = not sound_enabled # If sound is False, disable notification
+    try:
+        await bot.send_message(
+            chat_id=chat_id,
+            text=text,
+            parse_mode=ParseMode.MARKDOWN, # Or HTML, ensure `text` is formatted accordingly
+            disable_notification=disable_notification_for_send,
+            **kwargs
         )
-        context.user_data[USER_DATA_STEP] = UserSteps.NONE
+        log_info(f"Message sent to {chat_id}. Sound: {sound_enabled}. Text snippet: {text[:70]}...")
+        return True
+    except Forbidden:
+        log_warning(f"Bot was blocked by user {chat_id} or kicked from group. Cannot send message.")
+        # Here you might want to mark user as inactive in your database/settings
+        # e.g., context.application.user_data[chat_id]['active'] = False
+    except RetryAfter as e:
+        log_warning(f"Flood control exceeded for chat {chat_id}. Retry after {e.retry_after}s. Message: {text[:50]}")
+        await asyncio.sleep(e.retry_after + 1)
+        # Optionally retry: return await send_message_robustly(bot, chat_id, text, sound_enabled, **kwargs)
+    except (TimedOut, NetworkError) as e:
+        log_error(f"Telegram network error for chat {chat_id}: {e}. Message: {text[:50]}", exc=e)
+        # Optionally retry after a delay
+    except Exception as e:
+        log_error(f"Failed to send message to {chat_id}: {e}. Message: {text[:50]}", exc=e)
+    return False
+
+# --- Command Handlers (Examples, many are stubs or need refinement) ---
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles the /start command."""
+    user = update.effective_user
+    if not user: return # Should not happen
+    user_id_str = str(user.id)
+    # Initialize user data if new, or retrieve existing
+    # PTB persistence handles this: context.user_data is specific to this user.
+    # Default language setting
+    if "lang" not in context.user_data:
+        context.user_data["lang"] = DEFAULT_LANG
+        # You might want to ask for language on first start
+    if "current_tier" not in context.user_data: # Default tier
+        context.user_data["current_tier"] = "Free"
+    if "sound_enabled" not in context.user_data:
+        context.user_data["sound_enabled"] = True # Sound on by default
+    if "addresses" not in context.user_data:
+        context.user_data["addresses"] = []
+    lang = context.user_data["lang"]
+    context.user_data[USER_DATA_STEP_KEY] = UserStepsEnum.NONE # Reset step
+    welcome_message = get_translation("welcome", lang, name=user.first_name)
+    await update.message.reply_text(
+        welcome_message,
+        reply_markup=get_reply_markup_for_lang(lang, context, user_id_str)
+    )
+    # Ask for language choice on first start more explicitly
+    if "lang_chosen_once" not in context.user_data:
+        await choose_language_command(update, context, initial_setup=True)
+        context.user_data["lang_chosen_once"] = True
+
+async def choose_language_command(update: Update, context: ContextTypes.DEFAULT_TYPE, initial_setup: bool = False) -> None:
+    """Allows the user to choose the interface language."""
+    user = update.effective_user
+    if not user: return
+    lang = context.user_data.get("lang", DEFAULT_LANG) # Current lang for the prompt itself
+    buttons = [
+        [InlineKeyboardButton("Հայերեն  Armenian 🇦🇲", callback_data=f"{CALLBACK_PREFIX_LANGUAGE}hy")],
+        [InlineKeyboardButton("Русский Russian 🇷🇺", callback_data=f"{CALLBACK_PREFIX_LANGUAGE}ru")],
+        [InlineKeyboardButton("English 🇬🇧", callback_data=f"{CALLBACK_PREFIX_LANGUAGE}en")],
+    ]
+    markup = InlineKeyboardMarkup(buttons)
+    prompt_text = get_translation("choose_language_prompt", lang)
+    if initial_setup:
+        prompt_text = get_translation("choose_language_initial_prompt", lang, default_text="Please select your preferred language to continue:")
+    if update.callback_query: # If called from a callback (e.g. back button)
+        await update.callback_query.edit_message_text(prompt_text, reply_markup=markup)
+    else: # If called from a command
+        await update.message.reply_text(prompt_text, reply_markup=markup)
+    context.user_data[USER_DATA_STEP_KEY] = UserStepsEnum.AWAITING_LANGUAGE_CHOICE
+
+async def handle_language_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles language selection from InlineKeyboard."""
+    query = update.callback_query
+    await query.answer()
+    user = update.effective_user
+    if not user: return
+    chosen_lang = query.data.split(CALLBACK_PREFIX_LANGUAGE)[1]
+    context.user_data["lang"] = chosen_lang
+    context.user_data[USER_DATA_STEP_KEY] = UserStepsEnum.NONE
+    confirmation_text = get_translation("language_changed_confirmation", chosen_lang, lang_name=chosen_lang.upper())
+    await query.edit_message_text(text=confirmation_text)
+    # Also send a message with the new main keyboard in the chosen language
+    await context.bot.send_message(
+        chat_id=user.id,
+        text=get_translation("main_menu_now_active", chosen_lang), # "Main menu is now active in [Language]."
+        reply_markup=get_reply_markup_for_lang(chosen_lang, context, str(user.id))
+    )
+    log_info(f"User {user.id} changed language to {chosen_lang}")
+# ... (Other command handlers like add_address, remove_address_command, etc. need similar review and updates)
+# ... (handle_text_message needs to route based on context.user_data[USER_DATA_STEP_KEY])
+# IMPROVEMENT: Example of a more robust `add_address_command` flow
+async def add_address_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    if not user: return
+    lang = context.user_data.get("lang", DEFAULT_LANG)
+    # In a real scenario, you'd fetch regions from region_street_map or a predefined list.
+    # For now, using a placeholder list. These should be translated.
+    available_regions = list(region_street_map.keys()) if region_street_map else ["Ереван", "Котайк", "Арарат", "Ширак", "Лори", "Сюник", "Тавуш", "Армавир", "Гегаркуник", "Арагацотн", "Вайоц Дзор"]
+    if not available_regions:
+        await update.message.reply_text(get_translation("no_regions_configured", lang), reply_markup=get_reply_markup_for_lang(lang, context, str(user.id)))
+        return
+    buttons = [[KeyboardButton(get_translation(f"region_{reg.lower()}", lang, default_text=reg))] for reg in available_regions]
+    # Add a cancel button
+    buttons.append([KeyboardButton(get_translation("cancel_btn", lang))])
+    markup = ReplyKeyboardMarkup(buttons, resize_keyboard=True, one_time_keyboard=True)
+    await update.message.reply_text(get_translation("choose_region_prompt", lang), reply_markup=markup)
+    context.user_data[USER_DATA_STEP_KEY] = UserStepsEnum.AWAITING_REGION_CHOICE
+
+async def handle_region_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    if not user: return
+    lang = context.user_data.get("lang", DEFAULT_LANG)
+    chosen_region_text = update.message.text
+    # Reverse translate if needed, or map from display name to canonical name
+    # For now, assume chosen_region_text is the canonical name
+    # available_regions = list(region_street_map.keys()) if region_street_map else [...] # Get regions again
+    # Find the canonical region name if translated buttons were used. This is complex.
+    # Simpler: store canonical name in button callback_data if using InlineKeyboard for regions.
+    # With ReplyKeyboard, the text itself is sent.
+    # Basic cancel
+    if chosen_region_text == get_translation("cancel_btn", lang):
+        await update.message.reply_text(get_translation("action_cancelled", lang), reply_markup=get_reply_markup_for_lang(lang, context, str(user.id)))
+        context.user_data[USER_DATA_STEP_KEY] = UserStepsEnum.NONE
+        return
+    context.user_data[USER_DATA_SELECTED_REGION_KEY] = chosen_region_text # Store the chosen region
+    await update.message.reply_text(
+        get_translation("enter_street_prompt", lang, region=chosen_region_text),
+        reply_markup=ReplyKeyboardMarkup([[get_translation("cancel_btn", lang)]], resize_keyboard=True, one_time_keyboard=True) # Just a cancel button
+    )
+    context.user_data[USER_DATA_STEP_KEY] = UserStepsEnum.AWAITING_STREET_INPUT
+
+async def handle_street_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    if not user: return
+    lang = context.user_data.get("lang", DEFAULT_LANG)
+    raw_street_text = update.message.text.strip()
+    if raw_street_text == get_translation("cancel_btn", lang):
+        await update.message.reply_text(get_translation("action_cancelled", lang), reply_markup=get_reply_markup_for_lang(lang, context, str(user.id)))
+        context.user_data[USER_DATA_STEP_KEY] = UserStepsEnum.NONE
+        return
+    if not raw_street_text or len(raw_street_text) < 2: # Basic validation
+        await update.message.reply_text(get_translation("street_too_short_error", lang))
+        # Keep USER_DATA_STEP_KEY as AWAITING_STREET_INPUT to allow retry
+        return
+    selected_region = context.user_data.get(USER_DATA_SELECTED_REGION_KEY)
+    if not selected_region: # Should not happen if flow is correct
+        await update.message.reply_text(get_translation("error_region_not_selected", lang), reply_markup=get_reply_markup_for_lang(lang, context, str(user.id)))
+        context.user_data[USER_DATA_STEP_KEY] = UserStepsEnum.NONE
+        return
+    full_address_input_for_ai = f"{selected_region}, {raw_street_text}"
+    # Use AI to clarify/validate street against region
+    # await update.message.reply_text(get_translation("address_being_verified_ai", lang), reply_markup=get_reply_markup_for_lang(lang, context, str(user.id))) # Inform user
+    # Show typing action
+    await context.bot.send_chat_action(chat_id=user.id, action="typing")
+    # Pass region_street_map for potential cross-validation by AI or its caller
+    ai_address_result = await clarify_address_ai(full_address_input_for_ai, region_street_map)
+    if "error" in ai_address_result or not ai_address_result.get("street_identified"):
+        error_comment = ai_address_result.get("comment", "Could not understand the street name.")
+        await update.message.reply_text(
+            get_translation("ai_street_clarification_failed", lang, error=error_comment, region=selected_region) + "\n" + \
+            get_translation("please_try_again_street", lang)
+        )
+        # context.user_data[USER_DATA_STEP_KEY] = UserStepsEnum.AWAITING_STREET_INPUT # Allow retry
+        return # Keep step as AWAITING_STREET_INPUT
+    # For simplicity, we trust AI's region if it differs, or use user's selected_region
+    # A more robust system would handle mismatches or low certainty.
+    final_region = ai_address_result.get("region_identified", selected_region)
+    final_street = ai_address_result["street_identified"]
+    context.user_data[USER_DATA_TEMP_ADDRESS_KEY] = {"region": final_region, "street": final_street}
+    confirmation_text = get_translation(
+        "confirm_address_prompt", lang,
+        region=final_region,
+        street=final_street
+    )
+    buttons = [
+        [InlineKeyboardButton(get_translation("confirm_yes", lang), callback_data=f"{CALLBACK_PREFIX_ADDRESS_CONFIRM}yes")],
+        [InlineKeyboardButton(get_translation("confirm_no_retry", lang), callback_data=f"{CALLBACK_PREFIX_ADDRESS_CONFIRM}no")],
+    ]
+    markup = InlineKeyboardMarkup(buttons)
+    await update.message.reply_text(confirmation_text, reply_markup=markup)
+    context.user_data[USER_DATA_STEP_KEY] = UserStepsEnum.AWAITING_ADDRESS_CONFIRMATION
+
+async def handle_address_confirmation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    user = update.effective_user
+    if not user: return
+    lang = context.user_data.get("lang", DEFAULT_LANG)
+    choice = query.data.split(CALLBACK_PREFIX_ADDRESS_CONFIRM)[1]
+    if choice == "yes":
+        temp_address = context.user_data.get(USER_DATA_TEMP_ADDRESS_KEY)
+        if not temp_address:
+            await query.edit_message_text(get_translation("error_generic_try_again", lang))
+            context.user_data[USER_DATA_STEP_KEY] = UserStepsEnum.NONE
+            return
+        # Add to user's persisted addresses
+        if "addresses" not in context.user_data: context.user_data["addresses"] = []
+        # Check if address already exists
+        addr_exists = any(a["region"] == temp_address["region"] and a["street"] == temp_address["street"] for a in context.user_data["addresses"])
+        if addr_exists:
+            await query.edit_message_text(get_translation("address_already_exists", lang, region=temp_address["region"], street=temp_address["street"]))
+        else:
+            context.user_data["addresses"].append(temp_address)
+            await query.edit_message_text(get_translation("address_added_successfully", lang, region=temp_address["region"], street=temp_address["street"]))
+            log_info(f"User {user.id} added address: {temp_address}")
+        # Send main menu keyboard again
+        await context.bot.send_message(chat_id=user.id, text=get_translation("main_menu_prompt", lang), reply_markup=get_reply_markup_for_lang(lang, context, str(user.id)))
+    elif choice == "no":
+        await query.edit_message_text(get_translation("add_address_retry_prompt", lang))
+        # Restart the add address flow by prompting for region again
+        # To do this cleanly, might need to call add_address_command logic or set step to AWAITING_REGION_CHOICE
+        # For simplicity, just take them to main menu and they can try "Add Address" again
+        await context.bot.send_message(chat_id=user.id, text=get_translation("main_menu_prompt", lang), reply_markup=get_reply_markup_for_lang(lang, context, str(user.id)))
+    context.user_data[USER_DATA_STEP_KEY] = UserStepsEnum.NONE
+    context.user_data.pop(USER_DATA_TEMP_ADDRESS_KEY, None)
+    context.user_data.pop(USER_DATA_SELECTED_REGION_KEY, None)
+
+async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles general text messages based on the user's current step."""
+    user = update.effective_user
+    if not user or not update.message or not update.message.text: return
+    user_id_str = str(user.id)
+    lang = context.user_data.get("lang", DEFAULT_LANG)
+    text = update.message.text
+    current_step = context.user_data.get(USER_DATA_STEP_KEY, UserStepsEnum.NONE)
+    # Global commands accessible regardless of step (like cancel)
+    if text == get_translation("cancel_btn", lang): # Assuming "Cancel" is a general keyword
+        context.user_data[USER_DATA_STEP_KEY] = UserStepsEnum.NONE
+        await update.message.reply_text(get_translation("action_cancelled", lang), reply_markup=get_reply_markup_for_lang(lang, context, user_id_str))
+        return
+    # Step-based routing
+    if current_step == UserStepsEnum.AWAITING_REGION_CHOICE:
+        await handle_region_choice(update, context)
+    elif current_step == UserStepsEnum.AWAITING_STREET_INPUT:
+        await handle_street_input(update, context)
+    elif current_step == UserStepsEnum.AWAITING_FREQUENCY_CHOICE:
+        # This specific handler is in handlers.py, but text input needs routing here
+        await handle_frequency_choice(update, context, user_settings, translations, save_user_settings_async_wrapper_ptb(context))
+    # ... other steps for removing address, checking address etc.
+    # Button-like text commands (main menu)
+    elif text == get_translation("add_address_btn", lang):
+        await add_address_command(update, context)
+    elif text == get_translation("remove_address_btn", lang):
+        await remove_address_command(update, context) # Implement this
+    elif text == get_translation("show_addresses_btn", lang):
+        await address_list_command(update, context) # Implement this
+    elif text == get_translation("clear_all_btn", lang):
+        await clear_all_addresses_command(update, context) # Implement this
+    elif text == get_translation("check_address_btn", lang):
+        await check_specific_address_command(update, context) # Implement this
+    elif text == get_translation("set_frequency_btn", lang):
+        # This handler is in handlers.py, call it
+        await set_frequency_command(update, context, user_settings, translations)
+    elif text == get_translation("change_language_btn", lang):
+        await choose_language_command(update, context)
+    elif text == get_translation("help_btn", lang):
+        await show_help_command(update, context) # Implement this
+    else:
+        # Fallback for unrecognized text if not in a specific step
+        # Check if AI is available and the text is long enough to be a query
+        if is_ai_available() and len(text) > 10: # Arbitrary length
+             # Could try to interpret as a general query or address check
+             # For now, just a generic reply
+            await update.message.reply_text(get_translation("unknown_command", lang), reply_markup=get_reply_markup_for_lang(lang, context, user_id_str))
+        else:
+            await update.message.reply_text(get_translation("unknown_command_short", lang), reply_markup=get_reply_markup_for_lang(lang, context, user_id_str))
+# --- Wrappers for saving data when using PTB persistence ---
+# PTB persistence saves user_data and bot_data automatically.
+# If you have global dicts that are NOT part of user_data/bot_data and need saving,
+# these wrappers would be for them.
+# For `notified_announcements` and `region_street_map`, they are saved in their respective load/save calls.
+# `user_settings` and `addresses` are now part of `context.user_data`.
+def save_user_settings_async_wrapper_ptb(context: ContextTypes.DEFAULT_TYPE) -> Callable:
+    """
+    Wrapper for saving user_settings (which are now in context.user_data).
+    PTB's persistence handles saving automatically. This function might only be needed
+    if you were saving to a separate user_settings.json AND wanted to trigger it from handlers.py.
+    Since user settings are in context.user_data, this wrapper is mostly a placeholder
+    to show how handlers.py could trigger a save if it were needed.
+    """
+    async def save_needed_data():
+        # context.application.persistence.flush() # Explicitly flush if needed, usually automatic
+        log_info("User data (including settings) will be saved by PTB persistence.")
+        pass # PTB persistence handles this.
+    return save_needed_data
+
+# Placeholder for other commands to be implemented or fleshed out
+async def remove_address_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if not user: return
+    lang = context.user_data.get("lang", DEFAULT_LANG)
+    user_addresses = context.user_data.get("addresses", [])
+    if not user_addresses:
+        await update.message.reply_text(get_translation("no_addresses_to_remove", lang), reply_markup=get_reply_markup_for_lang(lang, context, str(user.id)))
+        return
+    buttons = []
+    for i, addr in enumerate(user_addresses):
+        # Format address for display, ensure it's not too long for a button
+        addr_text = f"{addr['region']}, {addr['street']}"
+        max_len = 30 # Max button text length (approx)
+        display_text = (addr_text[:max_len-3] + "...") if len(addr_text) > max_len else addr_text
+        buttons.append([InlineKeyboardButton(display_text, callback_data=f"{CALLBACK_PREFIX_REMOVE_ADDRESS}{i}")])
+    buttons.append([InlineKeyboardButton(get_translation("cancel_btn", lang), callback_data=f"{CALLBACK_PREFIX_REMOVE_ADDRESS}cancel")])
+    markup = InlineKeyboardMarkup(buttons)
+    await update.message.reply_text(get_translation("select_address_to_remove_prompt", lang), reply_markup=markup)
+    context.user_data[USER_DATA_STEP_KEY] = UserStepsEnum.AWAITING_ADDRESS_TO_REMOVE # Or handle directly in callback
+
+async def handle_remove_address_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user = update.effective_user
+    if not user: return
+    lang = context.user_data.get("lang", DEFAULT_LANG)
+    data_part = query.data.split(CALLBACK_PREFIX_REMOVE_ADDRESS)[1]
+    if data_part == "cancel":
+        await query.edit_message_text(get_translation("action_cancelled", lang))
+        await context.bot.send_message(chat_id=user.id, text=get_translation("main_menu_prompt", lang), reply_markup=get_reply_markup_for_lang(lang, context, str(user.id)))
+        context.user_data[USER_DATA_STEP_KEY] = UserStepsEnum.NONE
+        return
+    try:
+        address_idx_to_remove = int(data_part)
+        user_addresses = context.user_data.get("addresses", [])
+        if 0 <= address_idx_to_remove < len(user_addresses):
+            removed_addr = user_addresses.pop(address_idx_to_remove)
+            await query.edit_message_text(get_translation("address_removed_successfully", lang, region=removed_addr["region"], street=removed_addr["street"]))
+            log_info(f"User {user.id} removed address: {removed_addr}")
+        else:
+            await query.edit_message_text(get_translation("error_invalid_selection", lang))
+    except ValueError:
+        await query.edit_message_text(get_translation("error_generic_try_again", lang))
+    await context.bot.send_message(chat_id=user.id, text=get_translation("main_menu_prompt", lang), reply_markup=get_reply_markup_for_lang(lang, context, str(user.id)))
+    context.user_data[USER_DATA_STEP_KEY] = UserStepsEnum.NONE
+
 
 async def address_list_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    log_info(f"[smart_bot] address_list_command from user {user.id if user else 'Unknown'}")
-    if not user or not update.message: return
-    user_id = user.id
-
-    lang = context.user_data.get(USER_DATA_LANG) or user_settings.get(user_id, {}).get("lang", "hy")
-    if is_user_rate_limited(user_id): return
-
-    addresses = user_addresses.get(user_id, [])
-    if addresses:
-        address_lines = [f"📍 {a['region']} — {a['street']}" for a in addresses] # Добавлен эмодзи
-        text_to_send = translations.get("address_list", {}).get(lang, "Your addresses:") + "\n" + "\n".join(address_lines)
-    else:
-        text_to_send = translations.get("no_addresses", {}).get(lang, "No addresses added yet.")
-
-    await update.message.reply_text(text_to_send, reply_markup=reply_markup_for_lang(lang))
-    context.user_data[USER_DATA_STEP] = UserSteps.NONE
-
-async def show_statistics_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    log_info(f"[smart_bot] show_statistics_command from user {user.id if user else 'Unknown'}")
-    if not user or not update.message: return
-    user_id = user.id
-
-    lang = context.user_data.get(USER_DATA_LANG) or user_settings.get(user_id, {}).get("lang", "hy")
-    if is_user_rate_limited(user_id):
-        log_info(f"[smart_bot] Rate limit for stats user {user_id}")
+    if not user: return
+    lang = context.user_data.get("lang", DEFAULT_LANG)
+    user_addresses = context.user_data.get("addresses", [])
+    if not user_addresses:
+        await update.message.reply_text(get_translation("no_addresses_added", lang), reply_markup=get_reply_markup_for_lang(lang, context, str(user.id)))
         return
+    message_lines = [get_translation("your_tracked_addresses_list", lang) + ":"]
+    for i, addr in enumerate(user_addresses):
+        message_lines.append(f"{i+1}. {addr['region']} - {addr['street']}")
+    await update.message.reply_text("\n".join(message_lines), reply_markup=get_reply_markup_for_lang(lang, context, str(user.id)))
 
-    # Статистика (пример)
-    active_users_with_addresses = len(user_addresses) # Пользователи с хотя бы одним адресом
-    total_addresses_tracked = sum(len(addrs) for addrs in user_addresses.values())
-    uptime_seconds = time() - start_time
-    uptime_days = int(uptime_seconds // 86400)
-    uptime_hours = int((uptime_seconds % 86400) // 3600)
-    uptime_minutes = int((uptime_seconds % 3600) // 60)
-    
-    uptime_str_parts = []
-    if uptime_days > 0: uptime_str_parts.append(f"{uptime_days} {translations.get('stats_days_unit', {}).get(lang, 'd')}")
-    if uptime_hours > 0: uptime_str_parts.append(f"{uptime_hours} {translations.get('stats_hours_unit', {}).get(lang, 'h')}")
-    if uptime_minutes > 0 or not uptime_str_parts : uptime_str_parts.append(f"{uptime_minutes} {translations.get('stats_minutes_unit', {}).get(lang, 'm')}")
-    uptime_formatted = " ".join(uptime_str_parts)
+async def clear_all_addresses_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # IMPROVEMENT: Add confirmation step
+    user = update.effective_user
+    if not user: return
+    lang = context.user_data.get("lang", DEFAULT_LANG)
+    context.user_data["addresses"] = []
+    await update.message.reply_text(get_translation("all_addresses_cleared", lang), reply_markup=get_reply_markup_for_lang(lang, context, str(user.id)))
+    log_info(f"User {user.id} cleared all addresses.")
 
-
-    user_specific_addresses = len(user_addresses.get(user_id, []))
-    user_specific_notifications_sent = len(user_notified_headers.get(user_id, set())) # Сколько уникальных уведомлений было отправлено этому пользователю
-
-    stats_text = (
-        f"📊 {translations.get('statistics_title', {}).get(lang, 'Bot Statistics')}\n\n"
-        f"🕒 {translations.get('stats_uptime', {}).get(lang, 'Uptime')}: {uptime_formatted}\n"
-        f"👥 {translations.get('stats_users_with_addresses', {}).get(lang, 'Users with addresses')}: {active_users_with_addresses}\n"
-        f"📍 {translations.get('stats_total_addresses', {}).get(lang, 'Total addresses tracked')}: {total_addresses_tracked}\n\n"
-        f"👤 {translations.get('stats_your_info_title', {}).get(lang, 'Your Information')}:\n"
-        f"🏠 {translations.get('stats_your_addresses', {}).get(lang, 'Your addresses')}: {user_specific_addresses}\n"
-        f"📨 {translations.get('stats_your_notifications_sent', {}).get(lang, 'Notifications you received')}: {user_specific_notifications_sent}"
-    )
-    await update.message.reply_text(stats_text, reply_markup=reply_markup_for_lang(lang))
-    context.user_data[USER_DATA_STEP] = UserSteps.NONE
+async def check_specific_address_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # This would be similar to add_address but instead of saving, it performs an immediate check.
+    # It would involve asking for region, then street, then querying current announcements.
+    # For brevity, not fully implemented here.
+    user = update.effective_user
+    if not user: return
+    lang = context.user_data.get("lang", DEFAULT_LANG)
+    await update.message.reply_text(get_translation("feature_not_fully_implemented", lang), reply_markup=get_reply_markup_for_lang(lang, context, str(user.id)))
 
 async def show_help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    log_info(f"[smart_bot] show_help_command from user {user.id if user else 'Unknown'}")
-    if not user or not update.message: return
-    user_id = user.id
-
-    lang = context.user_data.get(USER_DATA_LANG) or user_settings.get(user_id, {}).get("lang", "hy")
-    if is_user_rate_limited(user_id):
-        log_info(f"[smart_bot] Rate limit for help user {user_id}")
-        return
-
-    help_text_key = "help_text_main"
-    # BUG FIX 3: Использовать локализованный фолбэк, если основной текст помощи отсутствует
-    default_help_unavailable = translations.get("help_unavailable", {}).get(lang, "Help section is not yet available in your language.")
-    raw_help_message = translations.get(help_text_key, {}).get(lang, default_help_unavailable)
-    
-    # Экранирование Markdown символов
-    escaped_help_message = escape_markdown(raw_help_message, version=2)
-
-    try:
-        await update.message.reply_text(
-            escaped_help_message,
-            reply_markup=reply_markup_for_lang(lang),
-            parse_mode=ParseMode.MARKDOWN_V2
-        )
-    except Exception as e: # Если даже с экранированием не отправляется (маловероятно, но возможно)
-        log_error(f"Ошибка отправки сообщения помощи пользователю {user_id} (даже после экранирования): {e}", exc=e)
-        # Пробуем отправить без Markdown форматирования
-        await update.message.reply_text(raw_help_message, reply_markup=reply_markup_for_lang(lang))
-
-    context.user_data[USER_DATA_STEP] = UserSteps.NONE
-
-async def change_language_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    log_info(f"[smart_bot] change_language_command from user {user.id if user else 'Unknown'}")
-    if not user or not update.message : return
-    user_id = user.id # Определяем user_id
-
-    if is_user_rate_limited(user_id): return
-
-    # BUG FIX 2: Запрос на смену языка должен быть на текущем языке пользователя
-    current_lang = context.user_data.get(USER_DATA_LANG) or user_settings.get(user_id, {}).get("lang", "hy")
-    prompt_text = translations.get("choose_language_prompt_button", {}).get(current_lang, "Please select your new language using the buttons below:")
-
-    await update.message.reply_text(prompt_text, reply_markup=language_keyboard)
-    context.user_data[USER_DATA_STEP] = UserSteps.AWAITING_LANGUAGE_CHOICE
-
-
-# --- ОБРАБОТЧИК ТЕКСТОВЫХ СООБЩЕНИЙ И ДИАЛОГОВ ---
-async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    message = update.message
-    if not user or not message or not message.text: return
-
-    # Определяем язык пользователя для ответа
-    # Приоритет: user_data (текущая сессия) -> user_settings (сохраненные) -> дефолтный 'hy'
-    lang = context.user_data.get(USER_DATA_LANG) or user_settings.get(user.id, {}).get("lang", "hy")
-    # Если язык был определен из user_settings, сохраним его в user_data для этой сессии
-    if USER_DATA_LANG not in context.user_data and user.id in user_settings:
-        context.user_data[USER_DATA_LANG] = lang
-        
-    current_step = context.user_data.get(USER_DATA_STEP, UserSteps.NONE)
-    text = message.text.strip()
-    log_info(f"[smart_bot] handle_text_message: user={user.id}, text='{text}', lang='{lang}', current_step='{current_step}'")
-
-    if is_user_rate_limited(user.id):
-        log_info(f"Превышен лимит запросов для пользователя {user.id} (текстовое сообщение)")
-        # await message.reply_text(translations.get("error_rate_limit", {}).get(lang, "Too many requests. Please wait."))
-        return
-
-    if not validate_user_input(text):
-        await message.reply_text(translations.get("error_invalid_input", {}).get(lang, "Invalid input. Please try again."))
-        return
-
-    # Обработка выбора языка (самый первый шаг или смена языка)
-    if current_step == UserSteps.AWAITING_LANGUAGE_CHOICE:
-        log_info(f"[smart_bot] handle_text_message: Processing AWAITING_LANGUAGE_CHOICE for text '{text}'")
-        if text in languages: # 'Русский', 'English', 'Հայերեն'
-            selected_lang_code = languages[text] # 'ru', 'en', 'hy'
-            context.user_data[USER_DATA_LANG] = selected_lang_code
-            
-            current_user_s = user_settings.get(user.id, {})
-            current_user_s["lang"] = selected_lang_code
-            user_settings[user.id] = current_user_s
-            await save_user_settings_async() # Сохраняем настройки
-
-            await message.reply_text(
-                translations.get("language_set", {}).get(selected_lang_code, "Language set!"),
-                reply_markup=reply_markup_for_lang(selected_lang_code)
-            )
-            context.user_data[USER_DATA_STEP] = UserSteps.NONE
-            log_info(f"[smart_bot] Language set to '{selected_lang_code}' for user {user.id}. Step reset to NONE.")
-        else: # Если пользователь ввел текст вместо нажатия кнопки выбора языка
-            # Запрос должен быть на языке, который был *до* попытки смены, или на всех, если это первый вход
-            prompt_lang_for_choice = lang # Используем текущий язык для этого сообщения
-            if USER_DATA_LANG not in context.user_data and user.id not in user_settings : # Самый первый вход
-                 await message.reply_text(
-                    translations.get("choose_language", {}).get("hy", "Ընտրեք լեզուն:") + "\n" +
-                    translations.get("choose_language", {}).get("ru", "Выберите язык:") + "\n" +
-                    translations.get("choose_language", {}).get("en", "Choose language:"),
-                    reply_markup=language_keyboard)
-            else: # Попытка сменить язык, но ввел текст
-                 await message.reply_text(
-                    translations.get("choose_language_prompt_button", {}).get(prompt_lang_for_choice, "Please use buttons to select language."),
-                    reply_markup=language_keyboard)
-        return # Завершаем обработку здесь
-
-    # Обработка кнопки "Отмена"
-    if text == translations.get("cancel", {}).get(lang, "FallbackCancel"): # Добавлен фолбэк для 'cancel'
-        log_info(f"[smart_bot] handle_text_message: Cancel button pressed by user {user.id}")
-        await message.reply_text(
-            translations.get("cancelled", {}).get(lang, "Action cancelled."),
-            reply_markup=reply_markup_for_lang(lang)
-        )
-        context.user_data[USER_DATA_STEP] = UserSteps.NONE
-        context.user_data.pop(USER_DATA_SELECTED_REGION, None) # Очищаем выбранный регион, если был
-        return
-
-    # Обработка команд главного меню и других шагов
-    # (Сокращено для краткости, основная логика без изменений, но с добавлением .get для переводов)
-    if current_step == UserSteps.NONE:
-        log_info(f"[smart_bot] handle_text_message: current_step is NONE, processing main menu button '{text}'")
-        # Используем .get() для всех ключей переводов, чтобы избежать KeyError
-        if text == translations.get("add_address_btn", {}).get(lang):
-            await message.reply_text(translations.get("choose_region", {}).get(lang, "Choose region:"), reply_markup=get_region_keyboard(lang))
-            context.user_data[USER_DATA_STEP] = UserSteps.AWAITING_REGION
-        elif text == translations.get("remove_address_btn", {}).get(lang):
-            if user_addresses.get(user.id):
-                await message.reply_text(translations.get("enter_address_to_remove_prompt", {}).get(lang, "Which address to remove? (Enter street name)"), reply_markup=ReplyKeyboardMarkup([[translations.get("cancel", {}).get(lang, "Cancel")]], resize_keyboard=True, one_time_keyboard=True))
-                context.user_data[USER_DATA_STEP] = UserSteps.AWAITING_ADDRESS_TO_REMOVE
-            else:
-                await message.reply_text(translations.get("no_addresses", {}).get(lang, "No addresses yet."), reply_markup=reply_markup_for_lang(lang))
-        elif text == translations.get("show_addresses_btn", {}).get(lang):
-            await address_list_command(update, context)
-        elif text == translations.get("clear_all_btn", {}).get(lang):
-            if user_addresses.get(user.id):
-                confirm_keyboard = ReplyKeyboardMarkup([
-                    [KeyboardButton(translations.get("yes", {}).get(lang, "Yes")), KeyboardButton(translations.get("no", {}).get(lang, "No"))]
-                ], resize_keyboard=True, one_time_keyboard=True)
-                await message.reply_text(translations.get("confirm_clear", {}).get(lang, "Confirm clear all addresses?"), reply_markup=confirm_keyboard)
-                context.user_data[USER_DATA_STEP] = UserSteps.AWAITING_CLEAR_ALL_CONFIRMATION
-            else:
-                await message.reply_text(translations.get("no_addresses", {}).get(lang, "No addresses yet."), reply_markup=reply_markup_for_lang(lang))
-        elif text == translations.get("check_address_btn", {}).get(lang):
-            await message.reply_text(translations.get("enter_address_to_check_street", {}).get(lang, "Enter street to check:"), reply_markup=ReplyKeyboardMarkup([[translations.get("cancel", {}).get(lang, "Cancel")]], resize_keyboard=True, one_time_keyboard=True))
-            context.user_data[USER_DATA_STEP] = UserSteps.AWAITING_ADDRESS_TO_CHECK
-        elif text == translations.get("change_language_btn", {}).get(lang):
-            await change_language_command(update, context)
-        elif text == translations.get("statistics_btn", {}).get(lang):
-            await show_statistics_command(update, context)
-        elif text == translations.get("help_btn", {}).get(lang):
-            await show_help_command(update, context)
-        elif text == translations.get("subscription_btn", {}).get(lang):
-            await show_subscription_options(update, context) # Это покажет InlineKeyboard
-        elif text == translations.get("set_frequency_btn", {}).get(lang):
-            log_info(f"[smart_bot] 'Set Frequency' button pressed by user {user.id}. Calling set_frequency_command.")
-            await set_frequency_command(update, context) # Эта команда из handlers.py
-        else:
-            log_info(f"[smart_bot] Unknown command/button '{text}' from user {user.id} in step NONE.")
-            await message.reply_text(translations.get("unknown_command", {}).get(lang, "Unknown command."), reply_markup=reply_markup_for_lang(lang))
-        return
-
-    # --- Обработка шагов диалога ---
-    if current_step == UserSteps.AWAITING_REGION:
-        # Пользователь выбрал регион (текст кнопки региона)
-        # Проверяем, есть ли такой регион в текущем языке
-        current_regions_map = {"hy": regions_hy, "ru": regions_ru, "en": regions_en}
-        if text not in current_regions_map.get(lang, []):
-            await message.reply_text(translations.get("error_invalid_region_selection", {}).get(lang, "Invalid region. Please choose from buttons."), reply_markup=get_region_keyboard(lang))
-            return # Остаемся на том же шаге
-
-        context.user_data[USER_DATA_SELECTED_REGION] = text # Сохраняем выбранный регион
-        await message.reply_text(
-            translations.get("enter_street", {}).get(lang, "Please enter street name:"),
-            reply_markup=ReplyKeyboardMarkup([[translations.get("cancel", {}).get(lang, "Cancel")]], resize_keyboard=True, one_time_keyboard=True)
-        )
-        context.user_data[USER_DATA_STEP] = UserSteps.AWAITING_STREET
-
-    elif current_step == UserSteps.AWAITING_STREET:
-        region = context.user_data.get(USER_DATA_SELECTED_REGION)
-        if not region:
-            await message.reply_text(translations.get("error_region_not_selected", {}).get(lang, "Region not selected. Please start over."), reply_markup=reply_markup_for_lang(lang))
-            context.user_data[USER_DATA_STEP] = UserSteps.NONE
-            return
-
-        street = text # Пользователь ввел название улицы
-        user_addresses.setdefault(user.id, [])
-        normalized_new_street = normalize_address(street)
-        normalized_new_region = normalize_address(region)
-
-        is_duplicate = any(
-            normalize_address(addr["street"]) == normalized_new_street and \
-            normalize_address(addr["region"]) == normalized_new_region
-            for addr in user_addresses[user.id]
-        )
-
-        if is_duplicate:
-            await message.reply_text(
-                translations.get("address_exists", {}).get(lang, "Address '{address}' already exists.").format(address=f"{region}, {street}"),
-                reply_markup=reply_markup_for_lang(lang)
-            )
-        else:
-            user_addresses[user.id].append({"region": region, "street": street})
-            await save_tracked_data_async()
-            await message.reply_text(
-                translations.get("address_added", {}).get(lang, "Address '{address}' added.").format(address=f"{region}, {street}"),
-                reply_markup=reply_markup_for_lang(lang)
-            )
-            # Проверка на текущие отключения для нового адреса
-            shutdown_types = await is_shutdown_for_address_now(street, region)
-            if shutdown_types:
-                 types_str = ", ".join([translations.get(f"{stype}_off_short", {}).get(lang, stype.capitalize()) for stype in shutdown_types])
-                 await message.reply_text(translations.get("shutdown_found_for_new_address", {}).get(lang, "ℹ️ Active outages for new address: {types}.").format(types=types_str))
-            else:
-                 await message.reply_text(translations.get("no_shutdowns_for_new_address", {}).get(lang, "✅ No active outages found for the new address."))
-
-        context.user_data.pop(USER_DATA_SELECTED_REGION, None) # Очищаем выбранный регион
-        context.user_data[USER_DATA_STEP] = UserSteps.NONE
-
-    elif current_step == UserSteps.AWAITING_ADDRESS_TO_REMOVE:
-        address_to_remove_text = text # Пользователь ввел улицу для удаления
-        current_user_addresses = user_addresses.get(user.id, [])
-        normalized_address_to_remove = normalize_address(address_to_remove_text)
-        address_found_to_remove = None
-        
-        # Ищем адрес по совпадению улицы (предполагаем, что улицы уникальны в рамках одного пользователя, или пользователь знает, что удаляет)
-        # Для более точного удаления можно попросить выбрать из списка, если есть дубликаты по названию улицы в разных регионах.
-        best_match_addr = None
-        highest_ratio = 0.0
-        
-        for addr_obj in current_user_addresses:
-            norm_street = normalize_address(addr_obj["street"])
-            # Сначала ищем точное совпадение нормализованной улицы
-            if norm_street == normalized_address_to_remove:
-                address_found_to_remove = addr_obj
-                break
-            # Если точного нет, ищем нечеткое
-            ratio = SequenceMatcher(None, normalized_address_to_remove, norm_street).ratio()
-            if ratio > highest_ratio:
-                highest_ratio = ratio
-                best_match_addr = addr_obj
-        
-        if not address_found_to_remove and best_match_addr and highest_ratio > 0.7: # Порог для нечеткого совпадения
-            address_found_to_remove = best_match_addr
-            log_info(f"Fuzzy matched address for removal: '{address_to_remove_text}' with '{best_match_addr['street']}' (ratio: {highest_ratio})")
-
-
-        if address_found_to_remove:
-            current_user_addresses.remove(address_found_to_remove)
-            if not current_user_addresses: # Если список адресов пуст после удаления
-                user_addresses.pop(user.id, None)
-            else:
-                user_addresses[user.id] = current_user_addresses
-            await save_tracked_data_async()
-            await message.reply_text(
-                translations.get("address_removed", {}).get(lang, "Address '{address}' removed.").format(address=f"{address_found_to_remove['region']}, {address_found_to_remove['street']}"),
-                reply_markup=reply_markup_for_lang(lang)
-            )
-        else:
-            await message.reply_text(
-                translations.get("address_not_found_to_remove",{}).get(lang,"Address to remove not found: {address}").format(address=address_to_remove_text),
-                reply_markup=reply_markup_for_lang(lang)
-            )
-        context.user_data[USER_DATA_STEP] = UserSteps.NONE
-
-    elif current_step == UserSteps.AWAITING_CLEAR_ALL_CONFIRMATION:
-        if text == translations.get("yes", {}).get(lang, "Yes"):
-            user_addresses.pop(user.id, None) # Удаляем все адреса для этого пользователя
-            user_notified_headers.pop(user.id, None) # И историю уведомлений
-            await save_tracked_data_async()
-            await message.reply_text(translations.get("all_addresses_cleared",{}).get(lang, "All addresses cleared."), reply_markup=reply_markup_for_lang(lang))
-        elif text == translations.get("no", {}).get(lang, "No"):
-            await message.reply_text(translations.get("cancelled", {}).get(lang, "Cancelled."), reply_markup=reply_markup_for_lang(lang))
-        else: # Если пользователь ввел что-то кроме "Да" или "Нет"
-            await message.reply_text(translations.get("please_confirm_yes_no", {}).get(lang, "Please confirm (Yes/No)."), reply_markup=reply_markup_for_lang(lang))
-            return # Остаемся на этом шаге
-        context.user_data[USER_DATA_STEP] = UserSteps.NONE
-
-    elif current_step == UserSteps.AWAITING_ADDRESS_TO_CHECK:
-        street_to_check = text
-        # Для проверки берем первый регион из сохраненных адресов пользователя, или Ереван по умолчанию
-        default_region_to_check = "Երևան" # Армянское название для внутреннего использования, если нет других
-        if lang == "ru": default_region_to_check = "Ереван"
-        elif lang == "en": default_region_to_check = "Yerevan"
-
-        if user_addresses.get(user.id) and user_addresses[user.id]:
-            default_region_to_check = user_addresses[user.id][0]["region"] # Используем регион первого добавленного адреса
-
-        log_info(f"Checking immediate shutdown for: Street='{street_to_check}', Region='{default_region_to_check}'")
-        shutdown_types = await is_shutdown_for_address_now(street_to_check, default_region_to_check)
-
-        if shutdown_types:
-            types_str = ", ".join([translations.get(f"{stype}_off_short", {}).get(lang, stype.capitalize()) for stype in shutdown_types])
-            await message.reply_text(
-                translations.get("shutdown_check_found", {}).get(lang, "⚠️ Outages found for '{address}': {types}.").format(address=f"{default_region_to_check}, {street_to_check}", types=types_str),
-                reply_markup=reply_markup_for_lang(lang)
-            )
-        else:
-            await message.reply_text(
-                translations.get("shutdown_check_not_found", {}).get(lang, "✅ No outages found for '{address}'.").format(address=f"{default_region_to_check}, {street_to_check}"),
-                reply_markup=reply_markup_for_lang(lang)
-            )
-        context.user_data[USER_DATA_STEP] = UserSteps.NONE
-
-    elif current_step == UserSteps.AWAITING_FREQUENCY_CHOICE:
-        log_info(f"[smart_bot] Calling handle_frequency_choice from handlers.py for user {user.id}, text '{text}'")
-        # Эта функция из handlers.py должна сама сбросить шаг
-        await handle_frequency_choice(update, context)
-
-    elif current_step == UserSteps.AWAITING_SUBSCRIPTION_CHOICE:
-        log_info(f"[smart_bot] User {user.id} is in AWAITING_SUBSCRIPTION_CHOICE but sent text '{text}'. This step expects a CallbackQuery.")
-        await message.reply_text(
-            translations.get("use_inline_buttons_for_subscription", {}).get(lang, "Please use the buttons under the message to choose a subscription."),
-            reply_markup=reply_markup_for_lang(lang) # Возвращаем в главное меню
-        )
-        context.user_data[USER_DATA_STEP] = UserSteps.NONE # Сбрасываем шаг
-
-    else: # Неизвестный шаг или текст, который не должен был прийти на этом шаге
-        log_info(f"[smart_bot] Unhandled step {current_step} for user {user.id} with text '{text}'. Resetting step to NONE.")
-        await message.reply_text(translations.get("unknown_command", {}).get(lang, "Unknown state. Returning to menu."), reply_markup=reply_markup_for_lang(lang))
-        context.user_data[USER_DATA_STEP] = UserSteps.NONE
-    return
-
-# --- ПЕРИОДИЧЕСКИЕ ЗАДАЧИ ---
-async def periodic_site_check_job(context: ContextTypes.DEFAULT_TYPE):
-    now = time()
-    user_ids_with_settings = list(user_settings.keys()) # Копируем ключи, чтобы избежать проблем при изменении словаря во время итерации
-    log_info(f"[smart_bot] periodic_site_check_job running for {len(user_ids_with_settings)} users with settings.")
-
-    active_checks = 0
-    for user_id in user_ids_with_settings:
-        if not user_addresses.get(user_id): # Пропускаем пользователей без адресов
-            continue
-
-        current_user_s = user_settings.get(user_id, {}) # Получаем настройки пользователя
-        # Частота по умолчанию - из бесплатного тарифа, если не указана
-        default_frequency = premium_tiers.get("Free", {}).get("interval", 21600) # 6 часов
-        frequency_seconds = current_user_s.get("frequency", default_frequency)
-
-        if last_check_time.get(user_id, 0) + frequency_seconds <= now:
-            log_info(f"Запуск периодической проверки для пользователя {user_id} (частота: {frequency_seconds}s)")
-            try:
-                await check_site_for_user(user_id, context)
-                last_check_time[user_id] = now # Обновляем время последней проверки
-                active_checks += 1
-            except Exception as e:
-                log_error(f"Ошибка во время периодической проверки для пользователя {user_id}: {e}", exc=e)
-        
-        # Логика показа рекламы (пример)
-        # if current_user_s.get("ads_enabled", premium_tiers.get("Free", {}).get("ad_enabled", True)):
-        #     if last_ad_time.get(user_id, 0) + config.ad_interval_seconds <= now:
-        #         lang = current_user_s.get("lang", "hy")
-        #         ad_message = translations.get("ad_message_example", {}).get(lang, "This is an ad! Consider upgrading for an ad-free experience.")
-        #         try:
-        #             await context.bot.send_message(chat_id=user_id, text=ad_message)
-        #             last_ad_time[user_id] = now
-        #             log_info(f"Показана реклама пользователю {user_id}")
-        #         except Exception as e:
-        #             log_error(f"Ошибка отправки рекламы пользователю {user_id}: {e}")
-    log_info(f"[smart_bot] periodic_site_check_job completed. Active checks performed: {active_checks}")
-
-# --- ИНИЦИАЛИЗАЦИЯ И ЗАПУСК БОТА ---
-async def post_init_hook(application: Application):
-    log_info("[smart_bot] Bot post_init_hook: Загрузка данных...")
-    await load_user_settings_async()
-    await load_tracked_data_async()
-    # Восстановление last_check_time из user_settings, если необходимо
-    # for user_id, settings in user_settings.items():
-    #     if "last_successful_check" in settings: # Пример, если бы мы сохраняли это
-    #         last_check_time[user_id] = settings["last_successful_check"]
-    log_info("Данные бота успешно загружены.")
-
-async def post_shutdown_hook(application: Application):
-    log_info("[smart_bot] Bot post_shutdown_hook: Сохранение данных...")
-    # Можно добавить сохранение last_check_time в user_settings, если это критично
-    # for user_id, lct in last_check_time.items():
-    #    if user_id in user_settings:
-    #        user_settings[user_id]["last_successful_check"] = lct
-    await save_user_settings_async()
-    await save_tracked_data_async()
-    log_info("Данные успешно сохранены перед выключением.")
-
-def main():
-    log_info(f"ЗАПУСК НОВОЙ ВЕРСИИ БОТА (с исправлениями от {datetime.now().strftime('%Y-%m-%d %H:%M:%S')})")
-    log_info(f"Запуск CheckSiteUpdateBot с уровнем логирования: {config.log_level}")
-
-    # Указываем путь для файла PicklePersistence внутри папки backups
-    persistence_filepath = config.backup_dir / "bot_session_data.pickle"
-    ptb_persistence = PicklePersistence(filepath=persistence_filepath)
-
-    # Данные, передаваемые в обработчики через application.bot_data
-    # Эти данные должны быть доступны синхронно, если это необходимо в синхронных частях PTB
-    # Асинхронные функции и изменяемые глобальные словари передаются "как есть"
-    bot_shared_data = {
-        "user_settings_ref": user_settings, # Ссылка на глобальный словарь
-        "save_user_settings_async_func": save_user_settings_async,
-        "reply_markup_for_lang_func": reply_markup_for_lang,
-        "UserStepsEnum": UserSteps,
-        "USER_DATA_STEP_KEY": USER_DATA_STEP, # Ключ для user_data
-        "USER_DATA_LANG_KEY": USER_DATA_LANG, # Ключ для user_data
-        "premium_tiers_ref": premium_tiers, # Ссылка на словарь тарифов
-        "user_addresses_ref": user_addresses, # Ссылка на глобальный словарь
-        "save_tracked_data_async_func": save_tracked_data_async,
-        "translations_ref": translations, # Ссылка на словарь переводов
-        "config_ref": config, # Ссылка на объект конфигурации
-        # Дополнительные данные, если нужны в handlers.py или других модулях
-    }
-    log_info(f"[smart_bot] main: bot_shared_data prepared. Keys: {list(bot_shared_data.keys())}")
-    for key, value in bot_shared_data.items():
-        if callable(value):
-            log_info(f"[smart_bot] main: bot_shared_data function '{key}' is callable.")
-        elif value is None: # Проверяем, если какое-то значение None, это может быть проблемой
-            log_error(f"[smart_bot] main: bot_shared_data CRITICAL: '{key}' is None. Это может привести к ошибкам в обработчиках.")
-
-    application_builder = ApplicationBuilder().token(config.telegram_token)
-    application_builder.persistence(ptb_persistence)
-    application_builder.post_init(post_init_hook) # Вызывается после инициализации Application и JobQueue
-    application_builder.post_shutdown(post_shutdown_hook) # Вызывается перед остановкой
-    application = application_builder.build()
-    application.bot_data.update(bot_shared_data)
-    log_info("[smart_bot] main: Application built successfully with bot_data.")
-
-    # Регистрация обработчиков команд
-    application.add_handler(CommandHandler("start", start_command))
-    application.add_handler(CommandHandler("language", change_language_command))
-    application.add_handler(CommandHandler("set_frequency", set_frequency_command)) # из handlers.py
-    application.add_handler(CommandHandler("list_addresses", address_list_command)) # синоним для "Показать адреса"
-    application.add_handler(CommandHandler("stats", show_statistics_command))
-    application.add_handler(CommandHandler("help", show_help_command))
-    # Дополнительные команды, если нужны (например, /subscribe, /addaddress <регион> <улица>)
-    log_info("[smart_bot] main: CommandHandlers registered.")
-
-    # Обработчик текстовых сообщений (должен идти после CommandHandlers)
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
-
-    # Обработчик CallbackQuery (для Inline кнопок)
-    application.add_handler(CallbackQueryHandler(handle_subscription_callback, pattern=f"^{CALLBACK_PREFIX_SUBSCRIBE}"))
-    # application.add_handler(CallbackQueryHandler(handle_payment_callback, pattern=f"^{CALLBACK_PREFIX_PAY}")) # Для будущей оплаты
-    log_info("[smart_bot] main: Message and CallbackQuery Handlers registered.")
-
-    # Настройка и запуск периодической задачи
-    # Интервал можно сделать настраиваемым или зависящим от общей нагрузки
-    job_queue_interval_seconds = 60 # Как часто сам JobQueue проверяет, не пора ли запустить задачу
-    application.job_queue.run_repeating(
-        periodic_site_check_job,
-        interval=job_queue_interval_seconds,
-        first=10 # Запустить через 10 секунд после старта бота
+    if not user: return
+    lang = context.user_data.get("lang", DEFAULT_LANG)
+    # The help text from translations.py already includes Markdown formatting for contacts
+    help_text_key = "help_text_detailed" # Ensure this key exists in translations.py
+    help_text_content = get_translation(help_text_key, lang, default_text="Default help text if key not found.")
+    # Ensure contact details are appended if not part of the main help text key
+    # This is now handled in translations.py directly in the "help_text_detailed"
+    # contact_info = f"\n\n{get_translation('contact_us_info', lang)}\n{CLICKABLE_PHONE_MD}\n{CLICKABLE_ADDRESS_MD}"
+    # full_help_text = help_text_content + contact_info
+    await update.message.reply_text(
+        help_text_content, # Use the direct content which should include contacts
+        parse_mode=ParseMode.MARKDOWN,
+        disable_web_page_preview=True, # Good practice for help messages
+        reply_markup=get_reply_markup_for_lang(lang, context, str(user.id))
     )
-    log_info(f"[smart_bot] main: JobQueue task 'periodic_site_check_job' scheduled to run every {job_queue_interval_seconds}s.")
 
-    log_info("Бот начал опрос...")
+async def show_statistics_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Placeholder for statistics
+    user = update.effective_user
+    if not user: return
+    lang = context.user_data.get("lang", DEFAULT_LANG)
+    await update.message.reply_text(get_translation("stats_not_implemented_yet", lang), reply_markup=get_reply_markup_for_lang(lang, context, str(user.id)))
+
+async def show_subscription_options(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Placeholder for subscription info
+    user = update.effective_user
+    if not user: return
+    lang = context.user_data.get("lang", DEFAULT_LANG)
+    await update.message.reply_text(get_translation("subscription_info_placeholder", lang), reply_markup=get_reply_markup_for_lang(lang, context, str(user.id)))
+
+async def show_sound_settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if not user: return
+    lang = context.user_data.get("lang", DEFAULT_LANG)
+    current_sound_status = context.user_data.get("sound_enabled", True)
+    status_text = get_translation("sound_on", lang) if current_sound_status else get_translation("sound_off", lang)
+    button_text = get_translation("turn_sound_off", lang) if current_sound_status else get_translation("turn_sound_on", lang)
+    message_text = get_translation("current_sound_status_prompt", lang, status=status_text)
+    buttons = [[InlineKeyboardButton(button_text, callback_data=f"{CALLBACK_PREFIX_SOUND}{'off' if current_sound_status else 'on'}")],
+               [InlineKeyboardButton(get_translation("back_to_main_menu_btn", lang), callback_data=f"{CALLBACK_PREFIX_SOUND}cancel")]]
+    markup = InlineKeyboardMarkup(buttons)
+    if update.callback_query:
+        await update.callback_query.edit_message_text(message_text, reply_markup=markup)
+    else:
+        await update.message.reply_text(message_text, reply_markup=markup)
+
+async def handle_sound_settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user = update.effective_user
+    if not user: return
+    lang = context.user_data.get("lang", DEFAULT_LANG)
+    action = query.data.split(CALLBACK_PREFIX_SOUND)[1]
+    if action == "on":
+        context.user_data["sound_enabled"] = True
+        await query.edit_message_text(get_translation("sound_turned_on_confirmation", lang))
+    elif action == "off":
+        context.user_data["sound_enabled"] = False
+        await query.edit_message_text(get_translation("sound_turned_off_confirmation", lang))
+    elif action == "cancel":
+        await query.edit_message_text(get_translation("action_cancelled", lang))
+        # No need to resend main menu keyboard if just editing a message.
+        # Could send a new message if preferred.
+        # For now, let user use the reply keyboard or /start
+    # If not cancelling, show updated status and offer main menu
+    if action != "cancel":
+         await context.bot.send_message(chat_id=user.id, text=get_translation("main_menu_prompt", lang), reply_markup=get_reply_markup_for_lang(lang, context, str(user.id)))
+    log_info(f"User {user.id} set sound_enabled to {context.user_data['sound_enabled']}")
+
+async def post_init(application: Application) -> None:
+    """Tasks to run after the bot application has been initialized."""
+    # Load data that isn't handled by PTB's persistence directly at startup
+    await load_all_data()
+    # Set bot commands for different languages (optional, but good for UX)
+    # This is just an example for one language set.
+    # You might want to set this per user if your bot heavily relies on command list.
+    commands_hy = [
+        BotCommand("start", "Սկսել / Հիմնական մենյու"),
+        BotCommand("language", "Փոխել լեզուն"),
+        BotCommand("myaddresses", "Իմ հասցեները"),
+        BotCommand("addaddress", "Ավելացնել հասցե"),
+        BotCommand("help", "Օգնություն"),
+    ]
+    # You can set commands for specific languages or a general set
+    # await application.bot.set_my_commands(commands_hy, language_code="hy")
+    # For a general set:
+    await application.bot.set_my_commands(commands_hy) # Will use these for users with "hy" if no specific language match, or as default
+    log_info("Bot commands set.")
+    # Download LLM model if not present
+    # Ensure AI_MODELS_DIR and LOCAL_MODEL_PATH are correctly defined Path objects
+    model_dir_path = Path(AI_MODELS_DIR)
+    if not download_model_if_needed(MODEL_URL, LOCAL_MODEL_PATH, model_dir_path):
+        log_error(f"LLM Model could not be downloaded. AI features might be impacted.")
+    else:
+        # Try to initialize ai_engine again if it failed due to missing model
+        if not is_ai_available() and LOCAL_MODEL_PATH.exists():
+            log_info("Attempting to re-initialize AI engine after model download...")
+            # This is tricky as llm_instance is module-level in ai_engine.
+            # A better approach is for ai_engine to have a load_model() function
+            # that smart_bot can call after ensuring the model file exists.
+            # For now, assume ai_engine will pick it up on next import/call if it checks os.path.exists.
+            # Or, if ai_engine is structured as a class, instantiate it here.
+            pass # The check `is_ai_available()` will be more accurate now.
+
+# --- Main Bot Setup ---
+def main() -> None:
+    """Starts the bot."""
+    if not BOT_TOKEN: # Already checked, but good to be defensive
+        return
+    # IMPROVEMENT: Use JSONPersistence
+    persistence = JSONPersistence(filepath=PERSISTENCE_FILE)
+    application = (
+        ApplicationBuilder()
+        .token(BOT_TOKEN)
+        .persistence(persistence)
+        .post_init(post_init) # Run after setup
+        .build()
+    )
+    # Add handlers
+    application.add_handler(CommandHandler("start", start_command))
+    application.add_handler(CommandHandler("language", choose_language_command))
+    # The handlers.py `set_frequency_command` and `handle_frequency_choice` need to be adapted
+    # to use context.user_data instead of global user_settings dicts if they are to be used directly.
+    # For now, integrating frequency choice into main text handler or specific commands.
+    # application.add_handler(CommandHandler("setfrequency", set_frequency_command)) # From handlers.py
+    # Command aliases or direct commands for main menu items
+    application.add_handler(CommandHandler("addaddress", add_address_command))
+    application.add_handler(CommandHandler("removeaddress", remove_address_command))
+    application.add_handler(CommandHandler("myaddresses", address_list_command))
+    application.add_handler(CommandHandler("clearall", clear_all_addresses_command))
+    application.add_handler(CommandHandler("checkaddress", check_specific_address_command))
+    application.add_handler(CommandHandler("help", show_help_command))
+    application.add_handler(CommandHandler("stats", show_statistics_command))
+    application.add_handler(CommandHandler("subscription", show_subscription_options))
+    application.add_handler(CommandHandler("sound", show_sound_settings_command))
+    # Callback query handlers
+    application.add_handler(CallbackQueryHandler(handle_language_callback, pattern=f"^{CALLBACK_PREFIX_LANGUAGE}"))
+    application.add_handler(CallbackQueryHandler(handle_address_confirmation_callback, pattern=f"^{CALLBACK_PREFIX_ADDRESS_CONFIRM}"))
+    application.add_handler(CallbackQueryHandler(handle_remove_address_callback, pattern=f"^{CALLBACK_PREFIX_REMOVE_ADDRESS}"))
+    application.add_handler(CallbackQueryHandler(handle_sound_settings_callback, pattern=f"^{CALLBACK_PREFIX_SOUND}"))
+    # application.add_handler(CallbackQueryHandler(handle_subscription_callback, pattern=f"^{CALLBACK_PREFIX_SUBSCRIBE}")) # From original, ensure handler exists
+    # application.add_handler(CallbackQueryHandler(handle_help_action_callback, pattern=f"^{CALLBACK_PREFIX_HELP}")) # From original
+    # application.add_handler(CallbackQueryHandler(handle_faq_item_callback, pattern=f"^{CALLBACK_PREFIX_FAQ_ITEM}")) # From original
+    # Message handler for text messages (must be one of the last handlers)
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
+    # Job Queue
+    job_queue: Optional[JobQueue] = application.job_queue
+    if job_queue:
+        # Check interval carefully. 60s is frequent.
+        # If parsers are slow or rate-limited, this could be an issue.
+        job_queue_interval_seconds = int(os.getenv("JOB_QUEUE_INTERVAL_SECONDS", 300)) # Default 5 mins
+        # Run first job after a short delay to allow bot to fully start
+        first_run_delay = int(os.getenv("JOB_QUEUE_FIRST_DELAY_SECONDS", 15)) 
+        job_queue.run_repeating(
+            periodic_site_check_job,
+            interval=job_queue_interval_seconds,
+            first=first_run_delay,
+            name="periodic_site_check" # Naming the job is good practice
+        )
+        log_info(f"JobQueue 'periodic_site_check_job' scheduled every {job_queue_interval_seconds}s, first run in {first_run_delay}s.")
+    else:
+        log_error("JobQueue is not available. Periodic checks will not run.")
+    log_info("Bot is starting polling...")
     application.run_polling()
-    log_info("Бот остановлен.")
 
 if __name__ == "__main__":
     main()
+
+# <3

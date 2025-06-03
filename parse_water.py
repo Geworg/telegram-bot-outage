@@ -1,148 +1,186 @@
-# parse_water.py
 import asyncio
 import httpx
 from bs4 import BeautifulSoup
 import json
-import re # Добавлен импорт re
-# Предполагается, что ai_engine.py существует и ask_model в нем - синхронная функция
-# Если ask_model асинхронная, то вызов await loop.run_in_executor не нужен, можно делать await ask_model(...)
-from ai_engine import ask_model # Импортируем как есть
-from logger import log_error, log_info
+import re
+from datetime import datetime, timedelta
+from ai_engine import structure_text_with_ai_async, is_ai_available
+from logger import log_error, log_info, log_warning
 
-# URL для отключений воды
 WATER_URL = "https://interactive.vjur.am/"
+
+PROMPT_TEMPLATE_WATER = f"""
+You are an AI assistant specialized in extracting information about water outages in Armenia from text.
+The text is from the Veolia Jur website.
+Extract the following fields from the provided text. If a field is not present, use null or an empty string.
+Format dates and times as "YYYY-MM-DD HH:MM". Calculate duration if possible.
+
+Fields to extract:
+- "publication_date_on_site": Date and time the announcement was found/published (use "{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}" if not in text).
+- "shutdown_type": Type of shutdown (e.g., "planned", "emergency", "профилактическое", "аварийное", "պլանային", "վթարային"). If not specified, try to infer or use "unknown".
+- "start_datetime": Start date and time of the outage (e.g., "2024-07-15 10:00").
+- "end_datetime": End date and time of the outage (e.g., "2024-07-15 18:00").
+- "duration_hours": Calculated duration of the outage in hours (float or int).
+- "regions": List of affected regions/districts (e.g., ["Арабкир", "Центр"]).
+- "streets_buildings": List of strings, each describing affected streets and building numbers for a region.
+  Try to capture detailed street names and building numbers/ranges.
+  Example: ["ул. Наири Заряна 10-50", "пр. Комитаса все здания"].
+- "source_url": The URL from which this information was sourced (use "{WATER_URL}").
+- "original_text_snippet": First 100 characters of the original text for reference.
+- "additional_details": Any other relevant information not covered above.
+
+Respond ONLY with a single JSON object. Ensure all specified fields are present in your JSON response.
+Address information should be as precise as possible.
+
+Input text:
+{{text_content}}
+"""
 
 async def fetch_water_announcements_async() -> list[str]:
     log_info(f"Fetching water announcements from {WATER_URL} (async)...")
     raw_texts = []
     try:
-        async with httpx.AsyncClient(timeout=20.0) as client: # Увеличен таймаут
-            # Могут быть разные секции для плановых и аварийных, или все вместе
-            # Здесь пример для одной страницы, но можно расширить для нескольких URL, если нужно
+        async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.get(WATER_URL)
-            response.raise_for_status() # Проверка на HTTP ошибки
-
-            # Парсинг HTML (BeautifulSoup синхронный, для очень больших страниц можно вынести в executor)
+            response.raise_for_status()
             soup = BeautifulSoup(response.text, 'html.parser')
-            
-            # Ищем контейнеры с объявлениями. Классы могут отличаться.
-            # Этот селектор основан на предыдущем предположении. Адаптируйте под реальную структуру сайта.
-            # Например, если каждое объявление в <div class="announcement-item">
-            announcement_items = soup.select('div.items div.panel-group div.panel-body') # Пример селектора
-            if not announcement_items:
-                # Попробуем другой общий селектор, если первый не сработал
-                # announcement_items = soup.find_all('article') # или другой тег
-                log_info(f"No items found with 'div.items div.panel-group div.panel-body' at {WATER_URL}. Found {len(announcement_items)} items.")
-
-
-            for item in announcement_items:
-                text_content = item.get_text(separator="\n", strip=True) # Получаем текст, сохраняя переносы строк
-                if text_content: # Добавляем только если есть текст
-                    raw_texts.append(text_content)
-            
-        log_info(f"Fetched {len(raw_texts)} raw water announcements from {WATER_URL}.")
-        return raw_texts
-    except httpx.HTTPStatusError as e:
-        log_error(f"HTTP error {e.response.status_code} while fetching water data from {WATER_URL}: {e.request.url}")
+            # !!! ВАЖНО: ЭТОТ СЕЛЕКТОР НУЖНО АДАПТИРОВАТЬ ПОД РЕАЛЬНУЮ СТРУКТУРУ САЙТА VEOLIA JUR !!!
+            # Current selector 'div.items div.panel-group div.panel-body' is a placeholder.
+            # Inspect the website with browser developer tools (F12) to find correct selectors.
+            # Example selectors (these are guesses, replace with actual ones):
+            # announcement_items = soup.select('article.news-item')
+            # announcement_items = soup.select('div.shutdown-notice')
+            # If structure is like Gazprom:
+            announcement_container = soup.find('div', class_='items') # Or similar top-level container
+            if announcement_container:
+                # Common pattern: panel-group contains multiple panel, each with panel-heading and panel-body
+                announcement_elements = announcement_container.select('div.panel-group div.panel.panel-default')
+                log_info(f"Found {len(announcement_elements)} potential water announcement elements using 'div.panel-group div.panel.panel-default'.")
+                if not announcement_elements: # Fallback to direct panel-body if the above is too specific
+                    announcement_elements = announcement_container.select('div.panel-body')
+                    log_info(f"Fallback: Found {len(announcement_elements)} potential water announcement elements using 'div.panel-body'.")
+                for item in announcement_elements:
+                    # Try to get a title or date if available, helps with context
+                    title_element = item.find(['h3', 'h4', 'div'], class_=['panel-title', 'title', 'date-display-single'])
+                    title_text = title_element.get_text(separator=" ", strip=True) if title_element else ""
+                    body_element = item.find('div', class_='panel-body') # Content is often in panel-body
+                    if not body_element: # If no panel-body, use the item itself (if it's a direct content block)
+                        body_element = item
+                    text_content = body_element.get_text(separator="\\n", strip=True) # Use \\n as separator for LLM
+                    if text_content:
+                        full_text = f"{title_text}\\n{text_content}".strip()
+                        raw_texts.append(full_text)
+                        log_info(f"Extracted water text block (length {len(full_text)} chars). Start: {full_text[:100]}...")
+                    else:
+                        log_warning(f"Empty text content for a water announcement item: {item.prettify()[:200]}")
+            else:
+                log_warning(f"Could not find the main announcement container ('div.items') on {WATER_URL}. Page structure might have changed.")
+                # As a last resort, try to grab all text from a main content area
+                main_content = soup.find('main') or soup.find('div', id='content') or soup.body
+                if main_content:
+                    all_text = main_content.get_text(separator="\\n", strip=True)
+                    if len(all_text) > 200: # Arbitrary threshold to avoid adding tiny bits of text
+                        log_warning(f"Using fallback: extracting all text from main content area of {WATER_URL} due to missing specific selectors.")
+                        # This is risky as it might grab unrelated text. Split into chunks if too long?
+                        # For now, add as one large block; LLM might be able to find multiple announcements.
+                        # raw_texts.append(all_text) # Disabled for now, too unreliable
+                        pass
+            if not raw_texts:
+                log_warning(f"No water announcements found on {WATER_URL} using current selectors. Website structure may have changed or no active announcements.")
     except httpx.RequestError as e:
-        log_error(f"Network error fetching water data from {WATER_URL}: {e}")
+        log_error(f"HTTPX RequestError fetching water announcements: {e}", exc=e)
+    except httpx.HTTPStatusError as e:
+        log_error(f"HTTPX HTTPStatusError fetching water announcements: {e.response.status_code} for {e.request.url}", exc=e)
     except Exception as e:
-        log_error(f"Generic error parsing water HTML from {WATER_URL}: {e}", exc=e)
-    return [] # Возвращаем пустой список в случае любой ошибки
+        log_error(f"Generic error fetching water announcements: {e}", exc=e)
+    log_info(f"Fetched {len(raw_texts)} raw text blocks for water announcements.")
+    return raw_texts
 
-async def extract_water_info_async(text: str) -> dict:
-    log_info_text = text[:70].replace('\n', ' ') # Сначала подготовить текст
-    log_info(f"Extracting water info for text (first 70 chars): {log_info_text}...")
-    # Промпт должен быть максимально точным и включать примеры разных форматов дат/времени, если они встречаются
-    prompt = f"""
-Проанализируй следующий текст объявления об отключении ВОДЫ и извлеки структурированную информацию.
-Текст объявления:
----
-{text}
----
-
-Извлеки данные строго в формате JSON со следующими полями:
-- "published": дата публикации объявления (string, "дд.мм.гггг" или null, если нет).
-- "status": тип отключения (string, "Плановое" или "Аварийное"; если неясно, определи по контексту или ставь "Плановое").
-- "start_date": дата начала отключения (string, "дд.мм.гггг").
-- "start_time": время начала отключения (string, "чч:мм").
-- "end_date": дата окончания отключения (string, "дд.мм.гггг").
-- "end_time": время окончания отключения (string, "чч:мм").
-- "regions": список регионов/административных районов (list of strings, например, ["Кентрон", "Арабкир"] или ["Армавирская область"] или null).
-- "streets": список затронутых улиц с номерами домов, если указаны (list of strings, например, ["ул. Абовяна 1-10", "пр. Маштоца все дома"] или null).
-- "description": краткое описание причины или дополнительная информация (string или null).
-
-Правила:
-1. Если поле отсутствует в тексте, значение должно быть null (JSON null, не строка "null").
-2. Даты должны быть в формате "дд.мм.гггг". Если год не указан, предположи текущий год ({datetime.now().year}).
-3. Время должно быть в формате "чч:мм" (24-часовой).
-4. Если указан диапазон дат (например, "с 21 по 23 мая"), "start_date" - первая дата, "end_date" - вторая.
-5. Если указано только "с [дата] [время] до [время]" (без даты окончания), значит "end_date" совпадает с "start_date".
-6. В "streets" включай также номера домов, корпуса, если они есть.
-7. В "regions" могут быть как районы Еревана, так и области Армении.
-
-Ответь ТОЛЬКО JSON объектом. Не добавляй никаких пояснений до или после JSON.
-Пример ответа:
-{{
-  "published": "20.05.2024",
-  "status": "Плановое",
-  "start_date": "21.05.2024",
-  "start_time": "10:00",
-  "end_date": "21.05.2024",
-  "end_time": "18:00",
-  "regions": ["Кентрон"],
-  "streets": ["ул. Туманяна 5, 7", "пр. Саят-Новы 10-15"],
-  "description": "Ремонтные работы на линии."
-}}
-"""
-    loop = asyncio.get_event_loop()
-    raw_json_output = "" # Инициализируем на случай ошибки до вызова LLM
-    try:
-        # Предполагаем, что ask_model - это блокирующая функция (CPU-bound или IO-bound)
-        raw_json_output = await loop.run_in_executor(None, ask_model, prompt)
-        
-        # Попытка очистить JSON от возможных текстовых "артефактов" (например, ```json ... ```)
-        match = re.search(r'{\s*.*?\s*}', raw_json_output, re.DOTALL)
-        if match:
-            cleaned_json_string = match.group(0)
-            try:
-                parsed_data = json.loads(cleaned_json_string)
-                log_info(f"Successfully extracted water info: Status - {parsed_data.get('status')}, StartDate - {parsed_data.get('start_date')}")
-                # Дополнительная валидация полей может быть здесь
-                return parsed_data
-            except json.JSONDecodeError as e_json:
-                log_error(f"JSON Decode Error for water after cleaning: {e_json}. Cleaned JSON String: '{cleaned_json_string}'. Raw LLM Output: '{raw_json_output}'")
-                return {} # Возвращаем пустой словарь при ошибке декодирования
-        else:
-            log_error(f"No JSON object found in LLM output for water. Raw LLM Output: {raw_json_output}")
-            return {}
-            
-    except Exception as e: # Ловим другие возможные ошибки (например, если ask_model падает)
-        log_error(f"Generic error in extract_water_info_async: {e}. LLM Output (if available): '{raw_json_output}'", exc=e)
+async def extract_water_info_async(text_content: str) -> dict:
+    """
+    Extracts structured information from a single water announcement text using AI.
+    """
+    if not text_content.strip():
+        log_warning("Skipping empty text content for water info extraction.")
         return {}
+    # log_info(f"Attempting to extract water info from text: {text_content[:150]}...") # Can be verbose
+    # IMPROVEMENT: Using the centralized structure_text_with_ai_async
+    structured_data = await structure_text_with_ai_async(text_content, PROMPT_TEMPLATE_WATER)
+    if "error" in structured_data:
+        log_warning(f"Failed to structure water text with AI. Error: {structured_data.get('comment')}. Original text snippet: {text_content[:100]}")
+        return structured_data # Return the error structure for further handling
+    # IMPROVEMENT: Add source_url and original_text_snippet if not already added by LLM
+    if "source_url" not in structured_data:
+        structured_data["source_url"] = WATER_URL
+    if "original_text_snippet" not in structured_data and "original_text" in structured_data: # Use full original_text if snippet not made by LLM
+         structured_data["original_text_snippet"] = structured_data.get("original_text", "")[:100].replace('\n', ' ')
+    elif "original_text_snippet" not in structured_data:
+         structured_data["original_text_snippet"] = text_content[:100].replace('\n', ' ')
+    # IMPROVEMENT: Post-process dates and calculate duration if LLM didn't.
+    # This is an example; actual date parsing might need more robust logic based on LLM output format.
+    try:
+        if "start_datetime" in structured_data and "end_datetime" in structured_data and \
+           isinstance(structured_data["start_datetime"], str) and \
+           isinstance(structured_data["end_datetime"], str) and \
+           "duration_hours" not in structured_data: # Only if LLM didn't provide it
+            start_dt_str = structured_data["start_datetime"]
+            end_dt_str = structured_data["end_datetime"]
+            # Attempt to parse common date formats (adapt as needed based on LLM's typical output)
+            # This is a very basic example. Consider using dateutil.parser for more robust parsing.
+            dt_formats = ["%Y-%m-%d %H:%M", "%d.%m.%Y %H:%M", "%Y-%m-%d %H:%M:%S"]
+            start_dt, end_dt = None, None
+            for fmt in dt_formats:
+                try:
+                    start_dt = datetime.strptime(start_dt_str, fmt)
+                    break
+                except ValueError:
+                    continue
+            for fmt in dt_formats:
+                try:
+                    end_dt = datetime.strptime(end_dt_str, fmt)
+                    break
+                except ValueError:
+                    continue
+            if start_dt and end_dt and end_dt > start_dt:
+                duration = end_dt - start_dt
+                structured_data["duration_hours"] = round(duration.total_seconds() / 3600, 1)
+                log_info(f"Calculated duration: {structured_data['duration_hours']}h for water announcement.")
+            elif start_dt and end_dt and end_dt <= start_dt:
+                log_warning(f"End datetime is not after start datetime for water: Start: {start_dt_str}, End: {end_dt_str}")
+    except Exception as e:
+        log_warning(f"Could not calculate duration for water announcement: {e}. Data: {structured_data}")
+        # Do not fail the whole extraction if duration calculation fails
+    # log_info(f"Successfully extracted water info: { {k:v for k,v in structured_data.items() if k != 'original_text'} }") # Avoid logging full text
+    return structured_data
 
 async def parse_all_water_announcements_async() -> list[dict]:
     log_info("Starting parse_all_water_announcements_async...")
+    if not is_ai_available():
+        log_warning("AI model not available. Skipping water announcements parsing.")
+        return []
     texts = await fetch_water_announcements_async()
     if not texts:
         log_info("No water announcement texts fetched.")
         return []
-    
-    log_info(f"Fetched {len(texts)} water texts. Starting extraction...")
-    # Запускаем извлечение информации параллельно для всех текстов
-    # Используем asyncio.create_task для более явного управления задачами, если потребуется
+    log_info(f"Fetched {len(texts)} water texts. Starting extraction with AI...")
     tasks = [extract_water_info_async(t) for t in texts]
-    results = await asyncio.gather(*tasks, return_exceptions=True) # Собираем результаты или исключения
-    
+    results = await asyncio.gather(*tasks, return_exceptions=True)
     final_results = []
     for i, res in enumerate(results):
-        if isinstance(res, dict) and res:  # Убедимся, что это не ошибка и не пустой dict
+        if isinstance(res, dict) and res and "error" not in res:
             final_results.append(res)
         elif isinstance(res, Exception):
-            log_error(f"Exception during water info extraction task for text {i+1}: {res}", exc=res)
-        else:  # Если вернулся пустой dict из extract_info
-            text_snippet = texts[i][:70].replace('\n', ' ')
-            log_warning(f"Empty result from water info extraction for text {i+1}. Original text (first 70 chars): {text_snippet}")
-
-    log_info(f"Total water announcements successfully processed into JSON: {len(final_results)} (out of {len(texts)} fetched raw texts)")
+            log_error(f"Exception during water info extraction task {i+1}: {res}", exc=res)
+        elif isinstance(res, dict) and "error" in res:
+             log_warning(f"AI error for water text {i+1}. Error: {res.get('comment', 'Unknown AI error')}. Original: {res.get('original_text_snippet', res.get('original_text', 'N/A')[:100])}")
+        else:
+            log_warning(f"Empty or unexpected result from water info extraction for text {i+1}. Result: {res}")     
+    log_info(f"WATER announcements processed. Extracted valid data for {len(final_results)} out of {len(texts)} texts.")
     return final_results
+
+# NOTE: 1. Централизовать URL-адреса или получить из конфигурации.
+# 2. Обновить PROMPT_TEMPLATE_* для более подробного и надежного извлечения.
+# 3. Улучшить селекторы HTML в fetch_*_announcements_async с большим количеством журналов и резервных вариантов.
+# 4. Обеспечить, чтобы extract_*_info_async использовал structure_text_with_ai_async.
+# 5. При необходимости добавить постобработку для длительности.
+# 6. Улучшить журналирование в parse_all_*_announcements_async для успехов и неудач.
