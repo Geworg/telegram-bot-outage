@@ -1,3 +1,6 @@
+import telegram
+print("PTB version:", telegram.__version__)
+
 import os
 import json
 import re
