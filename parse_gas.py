@@ -4,8 +4,8 @@ from bs4 import BeautifulSoup
 import json
 import re
 from datetime import datetime, timedelta
-from ai_engine import structure_text_with_ai_async, is_ai_available # Assuming this is correctly set up
-from logger import log_error, log_info, log_warning # Assuming this is correctly set up
+from ai_engine import structure_text_with_ai_async, is_ai_available
+from logger import log_error, log_info, log_warning
 
 GAS_URL_VTAR = "https://armenia-am.gazprom.com/notice/announcement/vtar/" # Emergency
 GAS_URL_PLAN = "https://armenia-am.gazprom.com/notice/announcement/plan/" # Planned
@@ -36,17 +36,14 @@ Fields to extract:
 Output the result as a single JSON object. If the text indicates no current outages of a certain type, reflect that, perhaps with an "all_clear" field set to true or empty locations.
 """
 
-
 async def fetch_gas_announcements_async() -> list[tuple[str, str]]: # Return list of (text, url)
     log_info("Fetching gas announcements (async)...")
     texts_with_sources = [] # Store tuples of (text_content, source_url)
-    
     # Map URL to its type (planned/emergency) and specific selectors if needed
     urls_to_fetch_map = {
         GAS_URL_PLAN: "planned",
         GAS_URL_VTAR: "emergency"
     }
-
     try:
         async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client: # Increased timeout
             for url, outage_type in urls_to_fetch_map.items():
@@ -54,12 +51,10 @@ async def fetch_gas_announcements_async() -> list[tuple[str, str]]: # Return lis
                 response = await client.get(url)
                 response.raise_for_status()
                 soup = BeautifulSoup(response.text, 'html.parser')
-                
                 content_extracted = False
                 # User for GAS_URL_PLAN: "текст начинается с <div class="page_text_cont"> до </div>"
                 # User for GAS_URL_VTAR: "только вот это: "<div id="content_wrapper">...<h1>..." (implies general text)
                 # Try 'div.page_text_cont' for both first, as it's a common content container.
-                
                 page_content_div = soup.select_one('div.page_text_cont')
                 if page_content_div:
                     text_content = page_content_div.get_text(separator='\n', strip=True)
@@ -129,7 +124,6 @@ async def extract_gas_info_async(text_content_with_source: tuple[str, str]) -> d
     if not await is_ai_available():
         log_warning("AI service is not available. Skipping gas info extraction.")
         return {"error": "AI service unavailable", "original_text": text_content, "source_url": source_url}
-
     try:
         # Use PROMPT_TEMPLATE_GAS defined above
         structured_data = await structure_text_with_ai_async(text_content, PROMPT_TEMPLATE_GAS, "gas")
@@ -141,7 +135,6 @@ async def extract_gas_info_async(text_content_with_source: tuple[str, str]) -> d
         structured_data["source_url"] = source_url # Ensure source_url is in the final dict
         structured_data["source_type"] = "gas"
         structured_data["original_text_snippet"] = text_content[:150]
-        
         # Infer shutdown_type from URL if AI doesn't fill it
         if "shutdown_type" not in structured_data or not structured_data.get("shutdown_type") or structured_data.get("shutdown_type") == "unknown":
             if source_url == GAS_URL_PLAN:
@@ -165,7 +158,6 @@ async def parse_all_gas_announcements_async() -> list[dict]:
     log_info(f"Fetched {len(texts_with_sources)} gas texts with sources. Starting AI extraction...")
     tasks = [extract_gas_info_async(tws) for tws in texts_with_sources]
     results = await asyncio.gather(*tasks, return_exceptions=True)
-    
     final_results = []
     for i, res in enumerate(results):
         original_text_snippet = "N/A"
@@ -173,7 +165,6 @@ async def parse_all_gas_announcements_async() -> list[dict]:
         if i < len(texts_with_sources):
             original_text_snippet = texts_with_sources[i][0][:100] if texts_with_sources[i][0] else "N/A"
             source_url_for_log = texts_with_sources[i][1]
-
 
         if isinstance(res, dict) and "error" not in res and res:
             final_results.append(res)

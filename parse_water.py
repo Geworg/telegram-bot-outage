@@ -4,8 +4,8 @@ from bs4 import BeautifulSoup
 import json
 import re
 from datetime import datetime, timedelta
-from ai_engine import structure_text_with_ai_async, is_ai_available # Assuming this is correctly set up
-from logger import log_error, log_info, log_warning # Assuming this is correctly set up
+from ai_engine import structure_text_with_ai_async, is_ai_available
+from logger import log_error, log_info, log_warning
 
 WATER_URL = "https://interactive.vjur.am/"
 
