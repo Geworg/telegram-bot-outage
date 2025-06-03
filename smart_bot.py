@@ -12,15 +12,12 @@ from difflib import SequenceMatcher, get_close_matches
 from enum import Enum, auto
 import urllib.parse
 import hashlib
-
 from dotenv import load_dotenv
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
 from telegram.ext import Application, ApplicationBuilder, CallbackQueryHandler, ContextTypes, CommandHandler, MessageHandler, filters, BasePersistence, JobQueue # PicklePersistence
 from telegram.ext.persistence import JSONPersistence
 from telegram.constants import ParseMode
 from telegram.error import Forbidden, RetryAfter, TimedOut, NetworkError
-
-# Project modules
 from logger import log_info, log_error, log_warning
 from translations import translations, CONTACT_PHONE_NUMBER, CONTACT_ADDRESS_TEXT, MAP_URL, CLICKABLE_PHONE_MD, CLICKABLE_ADDRESS_MD
 from parse_water import parse_all_water_announcements_async
