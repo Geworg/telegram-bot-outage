@@ -4,6 +4,11 @@ import os
 import json
 import re
 import asyncio
+from typing import Dict, List, Optional, Set, Any, Tuple, Callable
+from pathlib import Path
+import aiofiles
+import aiofiles.os as aios
+from datetime import datetime
 
 # --- Конфигурация модели ---
 MODEL_FILENAME = os.getenv("LLAMA_MODEL_FILENAME", "phi-2.q4_k_m.gguf") # IMPROVEMENT: Get from .env
