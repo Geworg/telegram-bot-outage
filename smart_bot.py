@@ -498,8 +498,6 @@ async def periodic_site_check_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     if ad_tasks:
         log_info(f"Sending ads to {len(ad_tasks)} free users.")
         await asyncio.gather(*ad_tasks, return_exceptions=True)
-        # Note: If using PicklePersistence or JSONPersistence, user_data changes are automatically saved.
-        # If managing user_data manually, ensure it's saved after updating LAST_AD_TIMESTAMP_KEY.
     job_duration = timestamp() - job_start_time
     log_info(f"Periodic site check job finished in {job_duration:.2f} seconds.")
 
@@ -987,8 +985,7 @@ def main() -> None:
     """Starts the bot."""
     if not BOT_TOKEN: # Already checked, but good to be defensive
         return
-    # IMPROVEMENT: Use JSONPersistence
-    persistence = JSONPersistence(filepath=PERSISTENCE_FILE)
+    persistence = PicklePersistence(filepath=PERSISTENCE_FILE)
     application = (
         ApplicationBuilder()
         .token(BOT_TOKEN)
