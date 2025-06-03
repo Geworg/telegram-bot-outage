@@ -40,13 +40,10 @@ async def fetch_water_announcements_async() -> list[str]:
         async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client: # Increased timeout
             response = await client.get(WATER_URL)
             response.raise_for_status()
-            
             soup = BeautifulSoup(response.text, 'html.parser')
-            
             # User: "уведомления находятся и начинаются с <div class="items"> до </div>"
             # Based on Water.html, the actual text is within panel-body inside items.
             # Example: <div class="items"> ... <div class="panel panel-danger/info..."> <div class="panel-body"> TEXT </div> </div> ... </div>
-            
             # Corrected selector to find all panel-body divs within the div.items container
             announcement_container = soup.find('div', class_='items')
             if announcement_container:
@@ -64,10 +61,8 @@ async def fetch_water_announcements_async() -> list[str]:
                 # The previous script used 'div.panel.panel-info', this is now incorporated above more generally.
                 # If 'div.items' is crucial and not found, it's a significant page change.
                 log_warning(f"Main announcement container 'div.items' not found at {WATER_URL}. Page structure might have changed.")
-
             if not raw_texts:
                 log_warning(f"No water announcement texts extracted from {WATER_URL}. Check selectors and page structure.")
-
     except httpx.HTTPStatusError as e:
         log_error(f"HTTP error fetching water announcements: {e.response.status_code} for {e.request.url}", exc=e)
         return []
@@ -77,7 +72,6 @@ async def fetch_water_announcements_async() -> list[str]:
     except Exception as e:
         log_error(f"General error fetching water announcements: {e}", exc=e)
         return []
-        
     log_info(f"Finished fetching water announcements. Total texts extracted: {len(raw_texts)}")
     return raw_texts
 
@@ -85,26 +79,21 @@ async def extract_water_info_async(text_content: str) -> dict:
     if not await is_ai_available():
         log_warning("AI service is not available. Skipping water info extraction.")
         return {"error": "AI service unavailable", "original_text": text_content}
-
     try:
         # Using the PROMPT_TEMPLATE_WATER defined at the top of this file
         structured_data = await structure_text_with_ai_async(text_content, PROMPT_TEMPLATE_WATER, "water")
-        
         if not structured_data:
             log_warning(f"AI returned no data for water text. Text: {text_content[:100]}...")
             return {"error": "AI returned no data", "original_text_snippet": text_content[:100]}
-
         # Add source URL and type if not already there from AI (though prompt asks for it)
         structured_data["source_url"] = WATER_URL
         structured_data["source_type"] = "water"
         structured_data["original_text_snippet"] = text_content[:150]
-
         # Example of post-processing AI output if necessary:
         # if "start_datetime" in structured_data and isinstance(structured_data["start_datetime"], str):
         #     # Attempt to parse and reformat, or validate
         #     pass 
         return structured_data
-
     except json.JSONDecodeError as je: # If AI output is not valid JSON (though structure_text_with_ai_async should handle this)
         log_error(f"Failed to decode JSON from AI for water: {je}. Raw output: AI_OUTPUT_WAS_HERE", exc=je) # Be careful logging raw output if sensitive
         return {"error": f"AI output JSON decode error: {je}", "original_text_snippet": text_content[:100]}
@@ -118,11 +107,9 @@ async def parse_all_water_announcements_async() -> list[dict]:
     if not texts:
         log_info("No water announcement texts fetched.")
         return []
-
     log_info(f"Fetched {len(texts)} water texts. Starting AI extraction with AI...")
     tasks = [extract_water_info_async(t) for t in texts]
     results = await asyncio.gather(*tasks, return_exceptions=True)
-    
     final_results = []
     for i, res in enumerate(results):
         if isinstance(res, dict) and "error" not in res and res: # Ensure it's a dict, no error, and not empty
@@ -132,8 +119,7 @@ async def parse_all_water_announcements_async() -> list[dict]:
         elif isinstance(res, dict) and "error" in res:
              log_warning(f"AI or processing error for water text {i+1}. Error: {res.get('error', 'Unknown AI error')}. Original snippet: {res.get('original_text_snippet', texts[i][:100] if i < len(texts) else 'N/A')}")
         else:
-            log_warning(f"Empty or unexpected result from water info extraction for text {i+1}. Result: {res}. Original snippet: {texts[i][:100] if i < len(texts) else 'N/A'}")     
-            
+            log_warning(f"Empty or unexpected result from water info extraction for text {i+1}. Result: {res}. Original snippet: {texts[i][:100] if i < len(texts) else 'N/A'}")   
     log_info(f"WATER announcements processed. Extracted valid data for {len(final_results)} out of {len(texts)} texts.")
     return final_results
 
@@ -148,3 +134,5 @@ async def parse_all_water_announcements_async() -> list[dict]:
 #         else:
 #             print("No water announcements parsed.")
 #     asyncio.run(main())
+
+# <3
