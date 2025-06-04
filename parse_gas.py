@@ -137,7 +137,7 @@ async def extract_gas_info_async(text_content_with_source: tuple[str, str]) -> d
         log_error(f"Error structuring gas text with AI from {source_url}: {e}. Text: {text_content[:100]}...", exc=e)
         return {"error": f"AI processing failed: {e}", "original_text_snippet": text_content[:100], "source_url": source_url}
 
-async def parse_all_gas_announcements_async() -> list[dict]:
+async def parse_all_gas_announcements_async(context) -> list[dict]:
     log_info("Starting parse_all_gas_announcements_async...")
     texts_with_sources = await fetch_gas_announcements_async()
     if not texts_with_sources:

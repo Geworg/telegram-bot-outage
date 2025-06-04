@@ -91,7 +91,7 @@ async def extract_electric_info_async(text_content: str) -> dict:
         log_error(f"Error structuring electric text with AI: {e}. Text: {text_content[:100]}...", exc=e)
         return {"error": f"AI processing failed: {e}", "original_text_snippet": text_content[:100]}
 
-async def parse_all_electric_announcements_async() -> list[dict]:
+async def parse_all_electric_announcements_async(context) -> list[dict]:
     log_info("Starting parse_all_electric_announcements_async...")
     texts = await fetch_electric_announcements_async()
     if not texts:

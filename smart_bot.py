@@ -768,6 +768,10 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @handler_prechecks
 async def handle_language_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
+    data = query.data if query and query.data else "<no data>"
+    log_info(f"[DBG] handle_language_callback: callback_data = «{data}»")
+    # await query.answer()
+    # query = update.callback_query
     await query.answer()
     user = query.from_user
     user_id_str = str(user.id)
@@ -1087,6 +1091,8 @@ async def show_help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @handler_prechecks
 async def handle_text_message_new_logic(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip() if update.message else "<no text>"
+    log_info(f"[DBG] Входящий текст: «{text}», текущий шаг: {context.user_data.get(USER_DATA_STEP)}")
     user = update.effective_user # Гарантированно есть
     message = update.message
     user_id = user.id; user_id_str = str(user.id)
