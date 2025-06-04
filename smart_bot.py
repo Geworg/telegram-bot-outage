@@ -3,6 +3,7 @@ import json
 import re
 import asyncio
 import shutil
+import sys
 from datetime import datetime, time as dt_time, timedelta
 from dataclasses import dataclass, field
 from time import time as timestamp
@@ -30,6 +31,10 @@ from ai_engine import clarify_address_ai, is_ai_available, MODEL_PATH as AI_MODE
 import aiofiles
 import aiofiles.os as aios
 from pathlib import Path
+
+if os.getenv("MAINTENANCE_MODE", "false").lower() == "true":
+    print("🚧 Приложение в режиме обслуживания. Остановка.")
+    sys.exit(1)
 
 # --- КОНСТАНТЫ ---
 class UserSteps(Enum):
@@ -104,7 +109,6 @@ class BotConfig:
     support_chat_id_str: Optional[str] = None
     max_requests_per_minute: int = 30 # Added from previous context
     max_backups_to_keep: int = 5 # Added from previous context
-
 
     admin_user_ids: List[int] = field(init=False, default_factory=list)
     support_chat_id: Optional[int] = field(init=False, default=None)
