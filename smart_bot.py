@@ -1044,7 +1044,19 @@ async def show_help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lang = get_lang_for_handler(context, user.id)
     help_text = handler_data.translations.get("help_text_detailed", {}).get(
         lang,
-        # Если перевод не найден, можно использовать подсказку по умолчанию:
+        "🇦🇲\n"
+        "Հասանելի հրամաններ՝\n"
+        "/start — Գործարկեք բոտը և ընտրեք լեզու։\n"
+        "/language — Փոխեք ինտերֆեյսի լեզուն։\n"
+        "/myaddresses — Ցուցադրեք պահպանված հասցեները։\n"
+        "/stats — Ցուցադրեք վիճակագրությունը։\n"
+        "/help — Ցուցադրեք այս հուշումը։\n"
+        "/sound — Ձայնի կարգավորումներ։\n"
+        "/set_frequency — Փոխեք ստուգումների հաճախականությունը։\n\n"
+        "Admin հրամաններ՝\n"
+        "/maintenance_on — Միացրեք սպասարկման ռեժիմը։\n"
+        "/maintenance_off — Անջատեք սպասարկման ռեժիմը։\n\n\n\n"
+        "🇷🇺\n"
         "Доступные команды:\n"
         "/start — Запустить бота и выбрать язык.\n"
         "/language — Изменить язык интерфейса.\n"
@@ -1052,11 +1064,22 @@ async def show_help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/stats — Показать статистику.\n"
         "/help — Показать эту подсказку.\n"
         "/sound — Настройки звука.\n"
-        "/set_frequency — Изменить частоту проверок.\n"
-        "\n"
+        "/set_frequency — Изменить частоту проверок.\n\n"
         "Админские команды:\n"
         "/maintenance_on — Включить режим обслуживания.\n"
-        "/maintenance_off — Выключить режим обслуживания."
+        "/maintenance_off — Выключить режим обслуживания.\n\n\n\n"
+        "🇬🇧\n"
+        "Available commands:\n"
+        "/start — Start the bot and select a language.\n"
+        "/language — Change the interface language.\n"
+        "/myaddresses — Show saved addresses.\n"
+        "/stats — Show statistics.\n"
+        "/help — Show this hint.\n"
+        "/sound — Sound settings.\n"
+        "/set_frequency — Change the frequency of checks.\n\n"
+        "Admin commands:\n"
+        "/maintenance_on — Enable maintenance mode.\n"
+        "/maintenance_off — Disable maintenance mode."
     )
 
     await update.message.reply_text(help_text)
@@ -1086,11 +1109,11 @@ async def handle_text_message_new_logic(update: Update, context: ContextTypes.DE
     if current_step_name == UserSteps.NONE.name:
         # Сопоставление текста кнопки с действием
         button_actions: Dict[str, Callable] = {
-            handler_data.translations.get("add_address_btn", {}).get(lang): lambda: (
+            handler_data.translations.get("add_address_btn", {}).get(lang, "➕ Add Address"): lambda: (
                 message.reply_text(handler_data.translations.get("choose_region", {}).get(lang, "Region:"), reply_markup=get_region_keyboard(lang, context)),
                 UserSteps.AWAITING_REGION.name
             ),
-            handler_data.translations.get("remove_address_btn", {}).get(lang): lambda: (
+            handler_data.translations.get("remove_address_btn", {}).get(lang, "➖ Remove Address"): lambda: (
                 message.reply_text(handler_data.translations.get("enter_address_to_remove_prompt", {}).get(lang, "Street to remove?"), # TODO: Улучшить удаление
                                  reply_markup=ReplyKeyboardMarkup([[handler_data.translations.get("cancel", {}).get(lang, "Cancel")]], resize_keyboard=True, one_time_keyboard=True)),
                 UserSteps.AWAITING_ADDRESS_TO_REMOVE.name
@@ -1098,8 +1121,8 @@ async def handle_text_message_new_logic(update: Update, context: ContextTypes.DE
                 message.reply_text(handler_data.translations.get("no_addresses", {}).get(lang, "No addresses.")),
                 UserSteps.NONE.name # Остаемся в NONE
             ),
-            handler_data.translations.get("show_addresses_btn", {}).get(lang): lambda: (address_list_command(update, context), UserSteps.NONE.name), # address_list_command сам сбросит шаг
-            handler_data.translations.get("clear_all_btn", {}).get(lang): lambda: (
+            handler_data.translations.get("show_addresses_btn", {}).get(lang, "📋 Show Addresses"): lambda: (address_list_command(update, context), UserSteps.NONE.name), # address_list_command сам сбросит шаг
+            handler_data.translations.get("clear_all_btn", {}).get(lang, "🧹 Clear All"): lambda: (
                  message.reply_text(handler_data.translations.get("confirm_clear", {}).get(lang, "Confirm clear all?"), 
                                   reply_markup=ReplyKeyboardMarkup([[KeyboardButton(handler_data.translations.get("yes", {}).get(lang, "Yes")),
                                                                      KeyboardButton(handler_data.translations.get("no", {}).get(lang, "No"))]],
@@ -1108,12 +1131,12 @@ async def handle_text_message_new_logic(update: Update, context: ContextTypes.DE
             ) if handler_data.user_addresses.get(user_id) else (
                 message.reply_text(handler_data.translations.get("no_addresses", {}).get(lang, "No addresses.")), UserSteps.NONE.name
             ),
-            handler_data.translations.get("check_address_btn", {}).get(lang): lambda: (check_address_command_entry(update, context), UserSteps.AWAITING_REGION_FOR_CHECK.name), # check_address_command_entry установит шаг
-            handler_data.translations.get("sound_settings_btn", {}).get(lang): lambda: (sound_settings_command(update, context), UserSteps.NONE.name), # Управляется коллбэками
-            handler_data.translations.get("subscription_btn", {}).get(lang): lambda: (show_subscription_options(update, context), UserSteps.AWAITING_SUBSCRIPTION_CHOICE.name),
-            handler_data.translations.get("statistics_btn", {}).get(lang): lambda: (show_statistics_command(update, context), UserSteps.NONE.name),
-            handler_data.translations.get("set_frequency_btn", {}).get(lang): lambda: (set_frequency_command_entry(update, context), UserSteps.AWAITING_FREQUENCY_CHOICE.name), # set_frequency_command_entry установит шаг
-            handler_data.translations.get("help_btn", {}).get(lang): lambda: (show_help_command(update, context), UserSteps.NONE.name), # show_help_command - для меню помощи
+            handler_data.translations.get("check_address_btn", {}).get(lang, "🔍 Check Address"): lambda: (check_address_command_entry(update, context), UserSteps.AWAITING_REGION_FOR_CHECK.name), # check_address_command_entry установит шаг
+            handler_data.translations.get("sound_settings_btn", {}).get(lang, "🎵 Sound Settings"): lambda: (sound_settings_command(update, context), UserSteps.NONE.name), # Управляется коллбэками
+            handler_data.translations.get("subscription_btn", {}).get(lang, "⭐ Subscription"): lambda: (show_subscription_options(update, context), UserSteps.AWAITING_SUBSCRIPTION_CHOICE.name),
+            handler_data.translations.get("statistics_btn", {}).get(lang, "📊 Statistics"): lambda: (show_statistics_command(update, context), UserSteps.NONE.name),
+            handler_data.translations.get("set_frequency_btn", {}).get(lang, "⏱️ Set Frequency"): lambda: (set_frequency_command_entry(update, context), UserSteps.AWAITING_FREQUENCY_CHOICE.name), # set_frequency_command_entry установит шаг
+            handler_data.translations.get("help_btn", {}).get(lang, "❓ Help"): lambda: (show_help_command(update, context), UserSteps.NONE.name), # show_help_command - для меню помощи
         }
         
         action_result = button_actions.get(text)
