@@ -303,17 +303,18 @@ def handler_prechecks(func: Callable):
             # Можно добавить сообщение пользователю о превышении лимита
             return
 
-        # 3. Установка языка в context.user_data для текущей сессии, если его там нет
-        if USER_DATA_LANG not in context.user_data:
-            lang_from_settings = handler_data.user_settings.get(user_id_str, {}).get("lang")
+        # ... (maintenance and rate limit checks) ...
+        current_context_lang = context.user_data.get(USER_DATA_LANG)
+        lang_from_settings = handler_data.user_settings.get(user_id_str, {}).get("lang")
+        log_info(f"[Prechecks] User: {user_id_str}. Context lang: {current_context_lang}. Settings lang: {lang_from_settings}.")
+
+        if USER_DATA_LANG not in context.user_data: # Only set from settings if not already in context (e.g., from a previous handler in same update)
             if lang_from_settings:
                 context.user_data[USER_DATA_LANG] = lang_from_settings
-            # Если языка нет ни в user_data, ни в settings, start_command должен предложить выбор.
-            # Для других команд, если язык не установлен, будет использован 'ru' по умолчанию при получении из handler_data.
-        
-        # 4. Убедимся, что текущий язык есть в context.user_data для последующих вызовов handler_data.translations
-        # Это делается внутри get_lang_for_handler(context)
-
+                log_info(f"[Prechecks] User: {user_id_str}. Set context lang from settings to: {lang_from_settings}.")
+            # else:
+                # log_info(f"[Prechecks] User: {user_id_str}. No lang in settings or context. start_command will prompt or default will be used.")
+        # ...
         return await func(update, context, *args, **kwargs)
     return wrapper
 
@@ -330,22 +331,35 @@ def get_lang_for_handler(context: ContextTypes.DEFAULT_TYPE, user_id: Optional[i
     return "ru" # Общий fallback
 
 async def reply_with_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, text_key: str, default_text: str = "Menu."):
-    """Отправляет переведенное сообщение и клавиатуру главного меню, сбрасывает шаг."""
     lang = get_lang_for_handler(context, update.effective_user.id if update.effective_user else None)
     handler_data = get_bot_data(context)
     message_text = handler_data.translations.get(text_key, {}).get(lang, default_text)
     
-    if update.message:
-        await update.message.reply_text(message_text, reply_markup=reply_markup_for_lang(lang, context))
-    elif update.callback_query and update.callback_query.message: # Если это коллбэк, отправляем новое сообщение
-        await update.callback_query.message.reply_text(message_text, reply_markup=reply_markup_for_lang(lang, context))
+    target_chat_id = update.effective_chat.id if update.effective_chat else None
+    if not target_chat_id:
+        log_error("reply_with_main_menu: Could not determine target_chat_id.")
+        return
+
+    # Send as a new message
+    await context.bot.send_message(chat_id=target_chat_id, text=message_text, reply_markup=reply_markup_for_lang(lang, context))
 
     context.user_data[USER_DATA_STEP] = UserSteps.NONE.name
-    # Очистка временных данных
-    for key_to_pop in [USER_DATA_SELECTED_REGION, USER_DATA_SELECTED_REGION_FOR_CHECK,
-                       USER_DATA_RAW_STREET_INPUT, USER_DATA_CLARIFIED_ADDRESS_CACHE,
-                       USER_DATA_TEMP_SOUND_SETTINGS]:
-        context.user_data.pop(key_to_pop, None)
+    
+    # Comprehensive cleanup of temporary user_data keys
+    keys_to_clear = [
+        USER_DATA_SELECTED_REGION, 
+        USER_DATA_SELECTED_REGION_FOR_CHECK,
+        USER_DATA_RAW_STREET_INPUT, 
+        USER_DATA_CLARIFIED_ADDRESS_CACHE,
+        USER_DATA_TEMP_SOUND_SETTINGS # If this is used and needs reset here
+        # Add any other temporary keys used in various flows
+    ]
+    cleared_keys_log = []
+    for key_to_pop in keys_to_clear:
+        if context.user_data.pop(key_to_pop, None) is not None:
+            cleared_keys_log.append(key_to_pop)
+    if cleared_keys_log:
+        log_info(f"Cleared temp user_data keys: {cleared_keys_log} for user {update.effective_user.id if update.effective_user else 'N/A'}")
 
 async def handle_cancel_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обрабатывает действие отмены."""
@@ -798,65 +812,59 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await reply_with_main_menu(update, context, "start_text", "Hello! Choose an action.")
 
 
-@handler_prechecks # This decorator should ensure lang is set up for the context
+@handler_prechecks
 async def handle_language_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    # data = query.data if query and query.data else "<no data>" # Already logged if needed
-    # log_info(f"[DBG] handle_language_callback: callback_data = «{data}»") # Already present
-
-    if not query or not query.data: # Defensive check
+    if not query or not query.data:
         log_warning("[LangCallback] Query or query.data is missing.")
         if query: await query.answer("Error processing request.")
         return
-
-    await query.answer() # Answer callback immediately
+    await query.answer()
 
     user = query.from_user
     user_id_str = str(user.id)
     handler_data = get_bot_data(context)
-
+    
     try:
-        # Ensure CALLBACK_PREFIX_LANG ends with ':' or use a robust split
         prefix_len = len(CALLBACK_PREFIX_LANG)
         if not query.data.startswith(CALLBACK_PREFIX_LANG):
-            log_error(f"Invalid callback data format: {query.data}")
-            await query.edit_message_text(text="Error: Invalid language callback.")
+            log_error(f"Invalid callback data format for language selection: {query.data}")
+            await query.edit_message_text(text="Error: Invalid language callback format.")
             return
-
-        selected_lang_code = query.data[prefix_len:] # Get the part after the prefix
+        
+        selected_lang_code = query.data[prefix_len:]
 
         if selected_lang_code not in languages.values():
             log_warning(f"Invalid language code '{selected_lang_code}' selected by user {user_id_str}.")
-            await query.edit_message_text(text="Error: Invalid language code.") # Consider using translated error
+            # Assuming you have a translation for this error
+            lang_for_error = context.user_data.get(USER_DATA_LANG, "en") # Use current or default for error msg
+            error_text = handler_data.translations.get("error_invalid_lang_code", {}).get(lang_for_error, "Error: Invalid language code.")
+            await query.edit_message_text(text=error_text)
             return
 
-        log_info(f"User {user_id_str} initiated language change to: {selected_lang_code}. Current context lang before change: {context.user_data.get(USER_DATA_LANG)}")
+        log_info(f"User {user_id_str} initiated language change to: {selected_lang_code}. Current context lang: {context.user_data.get(USER_DATA_LANG)}. Current settings lang: {handler_data.user_settings.get(user_id_str, {}).get('lang')}")
 
-        context.user_data[USER_DATA_LANG] = selected_lang_code # Update language in current session context *first*
-
-        current_s = handler_data.user_settings.get(user_id_str, {}).copy() # Work on a copy
+        context.user_data[USER_DATA_LANG] = selected_lang_code # Update current context
+        
+        current_s = handler_data.user_settings.get(user_id_str, {}).copy()
         current_s["lang"] = selected_lang_code
-        if "notification_sound_enabled" not in current_s:
-            current_s.update({
-                "notification_sound_enabled": True, "silent_mode_enabled": False,
-                "silent_mode_start_time": "23:00", "silent_mode_end_time": "07:00",
-                "timezone": handler_data.config.default_user_timezone
-            })
-        handler_data.user_settings[user_id_str] = current_s # Update the main settings dict
+        # ... (initialize other settings if needed) ...
+        handler_data.user_settings[user_id_str] = current_s
+        
+        # Log before and after save attempt
+        log_info(f"Attempting to save language '{selected_lang_code}' for user {user_id_str} to settings file.")
         await save_user_settings_async(context) # Persist changes
-
-        log_info(f"User {user_id_str} language set to: {selected_lang_code}. Context lang after change: {context.user_data.get(USER_DATA_LANG)}. Settings lang: {handler_data.user_settings.get(user_id_str, {}).get('lang')}")
-
-        # Delete the inline keyboard message
+        log_info(f"Save complete. Verifying settings for {user_id_str}: {handler_data.user_settings.get(user_id_str, {}).get('lang')}")
+        
         try:
             await query.delete_message()
         except Exception as e_del:
             log_warning(f"Could not delete language selection message for user {user_id_str}: {e_del}")
 
-        # Send new message with main menu in new language
-        # reply_with_main_menu will use get_lang_for_handler, which should now pick selected_lang_code from context.user_data
-        await reply_with_main_menu(update, context, "language_set", "Language set!") 
-        log_info(f"Replied with main menu after language change for user {user_id_str}.")
+        # The lang for "language_set" and its keyboard should now be selected_lang_code
+        # because reply_with_main_menu calls get_lang_for_handler which reads from context.user_data
+        await reply_with_main_menu(update, context, "language_set", "Language set!")
+        log_info(f"Language change to '{selected_lang_code}' for user {user_id_str} processed. Main menu sent.")
 
     except Exception as e:
         log_error(f"Error in handle_language_callback for {user_id_str}, data '{query.data}': {e}", exc_info=True)
@@ -1153,44 +1161,43 @@ async def show_help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(help_text)
 
+# In smart_bot.py
+
+# ... (other imports and setup) ...
 
 @handler_prechecks
 async def handle_text_message_new_logic(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message or not update.message.text: # Ensure message and text exist
+    if not update.message or not update.message.text:
         log_warning("[TextMsg] Received update without message text.")
         return
 
-    text_received = update.message.text.strip() # Use a consistent variable for stripped text
+    text_received = update.message.text.strip()
     user = update.effective_user
-    message = update.message
+    message = update.message # Ensure message is defined for replies
     user_id = user.id
     user_id_str = str(user.id)
-    lang = get_lang_for_handler(context, user_id) # Ensure lang is fetched early and consistently
+    lang = get_lang_for_handler(context, user_id)
     handler_data = get_bot_data(context)
     current_step_name = context.user_data.get(USER_DATA_STEP, UserSteps.NONE.name)
 
     log_info(f"[TextMsg Router] User: {user_id_str}, Received Text: '{text_received}', Lang: '{lang}', Step: '{current_step_name}'")
 
     # --- Centralized Cancel Check ---
-    # Get the localized "cancel" button text
-    # The fallback "#!#CANCEL#!#" is just in case, but translations should exist
-    cancel_text_localized = handler_data.translations.get("cancel", {}).get(lang, "❌ Cancel") # Fallback to a common one if needed
+    cancel_text_localized = handler_data.translations.get("cancel", {}).get(lang, "❌ Cancel") # Default to a common one
     log_info(f"[TextMsg Router] Comparing for Cancel: Received='{text_received}', ExpectedCancelLocalized='{cancel_text_localized}', Match={text_received == cancel_text_localized}")
-
     if text_received == cancel_text_localized:
-        log_info(f"[TextMsg Router] Cancel action triggered by text: '{text_received}'")
-        await handle_cancel_action(update, context)
+        log_info(f"[TextMsg Router] Cancel action triggered by text: '{text_received}' for step {current_step_name}")
+        await handle_cancel_action(update, context) # This resets step to NONE and replies with main menu
         return
 
-    # ---- Step NONE: Обработка кнопок главного меню ----
-    if current_step_name == UserSteps.NONE.name:
-        # Helper to get translated button text, ensures consistent lookup
-        def get_btn_text(key: str, default: str) -> str:
-            return handler_data.translations.get(key, {}).get(lang, default)
+    # Helper to get translated button text for cleaner lookups
+    def get_btn_text(key: str, default: str) -> str:
+        return handler_data.translations.get(key, {}).get(lang, default)
 
+    if current_step_name == UserSteps.NONE.name:
         button_actions: Dict[str, Callable] = {
             get_btn_text("add_address_btn", "➕ Add Address"): lambda: (
-                message.reply_text(get_btn_text("choose_region", "Region:"), reply_markup=get_region_keyboard(lang, context)),
+                message.reply_text(get_btn_text("choose_region", "Region:"), reply_markup=get_region_keyboard(lang, context)), # Message reply here
                 UserSteps.AWAITING_REGION.name
             ),
             get_btn_text("remove_address_btn", "➖ Remove Address"): lambda: (
@@ -1198,107 +1205,267 @@ async def handle_text_message_new_logic(update: Update, context: ContextTypes.DE
                                  reply_markup=ReplyKeyboardMarkup([[get_btn_text("cancel", "❌ Cancel")]], resize_keyboard=True, one_time_keyboard=True)),
                 UserSteps.AWAITING_ADDRESS_TO_REMOVE.name
             ) if handler_data.user_addresses.get(user_id) else (
-                message.reply_text(get_btn_text("no_addresses", "No addresses.")),
-                UserSteps.NONE.name
+                message.reply_text(get_btn_text("no_addresses", "No addresses.")), # Message reply here
+                UserSteps.NONE.name 
             ),
-            get_btn_text("show_addresses_btn", "📋 Show Addresses"): lambda: (address_list_command(update, context), UserSteps.NONE.name),
+            get_btn_text("show_addresses_btn", "📋 Show Addresses"): lambda: (address_list_command(update, context), UserSteps.NONE.name), # Command handles reply and step
             get_btn_text("clear_all_btn", "🧹 Clear All"): lambda: (
-                message.reply_text(get_btn_text("confirm_clear", "Confirm clear all?"),
+                 message.reply_text(get_btn_text("confirm_clear", "Confirm clear all?"), 
                                   reply_markup=ReplyKeyboardMarkup([[KeyboardButton(get_btn_text("yes", "Yes")),
                                                                      KeyboardButton(get_btn_text("no", "No"))]],
-                                                                    resize_keyboard=True, one_time_keyboard=True)),
+                                                                    resize_keyboard=True, one_time_keyboard=True)), # Message reply here
                 UserSteps.AWAITING_CLEAR_ALL_CONFIRMATION.name
             ) if handler_data.user_addresses.get(user_id) else (
-                message.reply_text(get_btn_text("no_addresses", "No addresses.")), UserSteps.NONE.name
+                message.reply_text(get_btn_text("no_addresses", "No addresses.")), # Message reply here
+                UserSteps.NONE.name
             ),
-            get_btn_text("check_address_btn", "🔍 Check Address"): lambda: (check_address_command_entry(update, context), UserSteps.AWAITING_REGION_FOR_CHECK.name),
-            get_btn_text("sound_settings_btn", "🎵 Sound Settings"): lambda: (sound_settings_command(update, context), UserSteps.NONE.name), # This command shows an inline keyboard
-            get_btn_text("subscription_btn", "⭐ Subscription"): lambda: (show_subscription_options(update, context), UserSteps.AWAITING_SUBSCRIPTION_CHOICE.name), # This shows an inline keyboard
-            get_btn_text("statistics_btn", "📊 Statistics"): lambda: (show_statistics_command(update, context), UserSteps.NONE.name),
-            get_btn_text("set_frequency_btn", "⏱️ Set Frequency"): lambda: (set_frequency_command_entry(update, context), UserSteps.AWAITING_FREQUENCY_CHOICE.name),
-            get_btn_text("help_btn", "❓ Help"): lambda: (show_help_command(update, context), UserSteps.NONE.name),
+            get_btn_text("check_address_btn", "🔍 Check Address"): lambda: (check_address_command_entry(update, context), UserSteps.AWAITING_REGION_FOR_CHECK.name), # Command handles reply and step
+            get_btn_text("sound_settings_btn", "🎵 Sound Settings"): lambda: (sound_settings_command(update, context), UserSteps.NONE.name), # Command handles reply, step managed by callbacks
+            get_btn_text("subscription_btn", "⭐ Subscription"): lambda: (show_subscription_options(update, context), UserSteps.AWAITING_SUBSCRIPTION_CHOICE.name), # Command handles reply, step managed by callbacks
+            get_btn_text("statistics_btn", "📊 Statistics"): lambda: (show_statistics_command(update, context), UserSteps.NONE.name), # Command handles reply and step
+            get_btn_text("set_frequency_btn", "⏱️ Set Frequency"): lambda: (set_frequency_command_entry(update, context), UserSteps.AWAITING_FREQUENCY_CHOICE.name), # Command handles reply and step
+            get_btn_text("help_btn", "❓ Help"): lambda: (show_help_command(update, context), UserSteps.NONE.name), # Command handles reply and step
         }
+        
+        action_to_execute = None
+        next_step_for_action = UserSteps.NONE.name # Default to no change or handled by command
 
-        action_result_found = False
-        for btn_text_key, action_lambda in button_actions.items():
+        for btn_text_key, action_config in button_actions.items():
             log_info(f"[TextMsg Router] Main Menu Check: Received='{text_received}', ComparingWith='{btn_text_key}', Match={text_received == btn_text_key}")
             if text_received == btn_text_key:
-                action_result = action_lambda()
-                action_result_found = True
-                if isinstance(action_result, tuple) and len(action_result) == 2:
-                    awaitable_action, next_step_name = action_result
-                    if asyncio.iscoroutine(awaitable_action): await awaitable_action
-                    elif callable(awaitable_action) and asyncio.iscoroutinefunction(awaitable_action): await awaitable_action()
-                    elif callable(awaitable_action): awaitable_action() # For simple function calls if any
-                    context.user_data[USER_DATA_STEP] = next_step_name
-                elif asyncio.iscoroutine(action_result):
-                    await action_result
-                elif callable(action_result) and asyncio.iscoroutinefunction(action_result): # For async lambdas
-                    await action_result()
-                # Add handling for non-async callables if needed, though most PTB actions are async
-                break # Action found and processed
+                if isinstance(action_config, tuple): # (action_lambda, next_step_name)
+                    action_to_execute = action_config[0]
+                    next_step_for_action = action_config[1]
+                else: # Just an action_lambda (e.g. a command that handles its own step)
+                    action_to_execute = action_config
+                break
+        
+        if action_to_execute:
+            log_info(f"[TextMsg Router] Action found for '{text_received}'. Next step will be: {next_step_for_action}")
+            result = action_to_execute() # Execute the lambda
+            if asyncio.iscoroutine(result): # If the lambda itself returned an awaitable (e.g. a direct command call)
+                await result
+            
+            # If the lambda returned a tuple like (message_reply_awaitable, step_name)
+            # this structure needs adjustment, or the lambda directly sets the step.
+            # The current button_actions lambdas mostly either call commands (which handle their own replies/steps)
+            # or return a (reply_awaitable, step_name) for direct execution.
+            # The above call `action_to_execute()` already executes the first part if it's a reply.
+            
+            # Set the step if it was part of the config
+            if next_step_for_action != UserSteps.NONE.name or action_to_execute is not None and not isinstance(action_config, tuple):
+                 # If action_config was not a tuple, it means the step is managed by the command or should remain NONE
+                 # If action_config was a tuple, next_step_for_action is already set.
+                 if next_step_for_action != UserSteps.NONE.name : # check if it needs to be assigned
+                    context.user_data[USER_DATA_STEP] = next_step_for_action.name
 
-        if not action_result_found:
+            # If a command was called that reset the step to NONE (e.g. address_list_command), this is fine.
+            # If a new step was set (e.g. AWAITING_REGION), this is also fine.
+            log_info(f"[TextMsg Router] After action for '{text_received}', new step in context: {context.user_data.get(USER_DATA_STEP)}")
+
+        else: # No button matched in NONE state
             log_warning(f"[TextMsg Router] Text '{text_received}' did not match any known main menu button for lang '{lang}'.")
             await message.reply_text(get_btn_text("unknown_command", "Unknown cmd."), reply_markup=reply_markup_for_lang(lang, context))
+        return # Crucial: Return after handling NONE state
+
+    elif current_step_name == UserSteps.AWAITING_REGION.name:
+        log_info(f"[TextMsg AWAITING_REGION] Received region: '{text_received}'. All known regions: {handler_data.all_known_regions}")
+        if text_received not in handler_data.all_known_regions:
+            log_warning(f"Invalid region '{text_received}' selected by user {user_id_str}.")
+            await message.reply_text(get_btn_text("error_invalid_region_selection", "Invalid region."), reply_markup=get_region_keyboard(lang, context))
+            return # Stay in this step
+        context.user_data[USER_DATA_SELECTED_REGION] = text_received
+        # Use get_btn_text for the prompt as well
+        prompt_text = get_btn_text("enter_street_for_add", "Street to add:")
+        log_info(f"[TextMsg AWAITING_REGION] Prompting for street in lang '{lang}': '{prompt_text}'") # Log the prompt
+        await message.reply_text(prompt_text,
+                                 reply_markup=ReplyKeyboardMarkup([[get_btn_text("cancel", "❌ Cancel")]], resize_keyboard=True, one_time_keyboard=True))
+        context.user_data[USER_DATA_STEP] = UserSteps.AWAITING_STREET.name
+        log_info(f"[TextMsg AWAITING_REGION] Step changed to AWAITING_STREET for user {user_id_str}.")
+        return 
+
+    elif current_step_name == UserSteps.AWAITING_STREET.name:
+        street_input = text_received # Already stripped
+        context.user_data[USER_DATA_RAW_STREET_INPUT] = street_input
+        selected_region = context.user_data.get(USER_DATA_SELECTED_REGION)
+
+        if not selected_region:
+            log_error(f"User {user_id_str} in AWAITING_STREET but no region selected. Resetting.")
+            await handle_cancel_action(update, context) # Should reset to main menu
+            return
+
+        ai_is_ready = await is_ai_available() # Removed context argument if not needed by your is_ai_available
+        
+        if ai_is_ready:
+            await message.reply_text(get_btn_text("address_clarifying_ai", "Checking... 🤖"), reply_markup=ReplyKeyboardMarkup([[]], remove_keyboard=True)) # remove_keyboard
+            # Pass context if your clarify_address_ai needs it, otherwise remove
+            clarified_data = await clarify_address_ai(street_input, region_street_map={"region_name": selected_region}) # Adjusted call based on ai_engine
+
+            buttons_confirm = []
+            # Check if 'street_identified' exists and is not None or empty
+            if clarified_data and not clarified_data.get("error") and clarified_data.get("street_identified"):
+                # Suggested street from AI
+                suggested_street_full = clarified_data.get("street_identified", "").strip()
+                # Cache the AI result, ensuring we have what we need
+                context.user_data[USER_DATA_CLARIFIED_ADDRESS_CACHE] = {
+                    "region_identified": clarified_data.get("region_identified", selected_region), # Use AI region or original
+                    "street_identified": suggested_street_full,
+                    "original_input": street_input # Keep original street input
+                }
+
+                prompt_msg = get_btn_text("ai_clarify_prompt", "AI: '{sug_addr}'. Correct?").format(
+                    sug_addr=f"{context.user_data[USER_DATA_CLARIFIED_ADDRESS_CACHE]['region_identified']}, {suggested_street_full}"
+                )
+                buttons_confirm = [
+                    [InlineKeyboardButton(get_btn_text("yes", "Yes"), callback_data=f"{CALLBACK_PREFIX_ADDRESS_CONFIRM}yes_ai")],
+                    [InlineKeyboardButton(get_btn_text("no_save_original", "No, save mine"), callback_data=f"{CALLBACK_PREFIX_ADDRESS_CONFIRM}original_input")],
+                    [InlineKeyboardButton(get_btn_text("cancel", "❌ Cancel"), callback_data=f"{CALLBACK_PREFIX_ADDRESS_CONFIRM}cancel_add")]
+                ]
+            else: # AI failed or no street identified
+                error_comment = clarified_data.get("error_comment", "AI could not process.") if clarified_data else "AI error."
+                # Ensure street_input (original) is part of the cache for "original_input" callback
+                context.user_data[USER_DATA_CLARIFIED_ADDRESS_CACHE] = {
+                     "original_input": street_input,
+                     "region_identified": selected_region # Keep original region
+                }
+                prompt_msg = get_btn_text("ai_clarify_failed_save_original_prompt", "AI: {comment}. Save '{addr}' as is?").format(
+                    comment=error_comment, addr=f"{selected_region}, {street_input}"
+                )
+                buttons_confirm = [
+                    [InlineKeyboardButton(get_btn_text("confirm_ai_save_original", "Save as is"), callback_data=f"{CALLBACK_PREFIX_ADDRESS_CONFIRM}original_input")],
+                    [InlineKeyboardButton(get_btn_text("cancel", "❌ Cancel"), callback_data=f"{CALLBACK_PREFIX_ADDRESS_CONFIRM}cancel_add")]
+                ]
+            await message.reply_text(prompt_msg, reply_markup=InlineKeyboardMarkup(buttons_confirm))
+            context.user_data[USER_DATA_STEP] = UserSteps.AWAITING_STREET_CONFIRMATION.name
+        else: # AI not available
+            user_addrs = handler_data.user_addresses.setdefault(user_id, [])
+            norm_street = normalize_address_component(street_input)
+            norm_region = normalize_address_component(selected_region)
+            is_duplicate = any(normalize_address_component(addr["street"]) == norm_street and 
+                               normalize_address_component(addr["region"]) == norm_region for addr in user_addrs)
+            if is_duplicate:
+                await message.reply_text(get_btn_text("address_exists", "Address exists.").format(address=f"{selected_region}, {street_input}"))
+            else:
+                user_addrs.append({"region": selected_region, "street": street_input})
+                await save_tracked_data_async(context)
+                await message.reply_text(get_btn_text("address_added", "Address added.").format(address=f"{selected_region}, {street_input}"))
+            await reply_with_main_menu(update, context, "menu_returned") # Resets step to NONE
         return
 
-    # ... (rest of your logic for other UserSteps) ...
-    # Ensure the `cancel_text_localized` is also checked within other steps if applicable,
-    # or rely on the top-level cancel check.
+    elif current_step_name == UserSteps.AWAITING_ADDRESS_TO_REMOVE.name:
+        # This needs more robust UI, e.g., listing addresses with inline buttons to select.
+        # For now, simple text match:
+        address_to_remove_text = text_received
+        user_addrs = handler_data.user_addresses.get(user_id, [])
+        found_and_removed = False
+        if user_addrs:
+            # Attempt to find by exact street match (simple for now)
+            # This is weak, as region isn't considered.
+            # A better way is to list them and let user choose by index or callback.
+            original_len = len(user_addrs)
+            user_addrs[:] = [addr for addr in user_addrs if addr["street"].strip().lower() != address_to_remove_text.lower()]
+            if len(user_addrs) < original_len:
+                found_and_removed = True
+                await save_tracked_data_async(context)
+                await message.reply_text(get_btn_text("address_removed", "Address '{address}' removed.").format(address=address_to_remove_text))
+            else:
+                await message.reply_text(get_btn_text("address_not_found_to_remove", "Address '{address}' not found.").format(address=address_to_remove_text))
+        else:
+            await message.reply_text(get_btn_text("no_addresses", "No addresses to remove."))
+        
+        await reply_with_main_menu(update, context, "menu_returned") # Go back to main menu
+        return
 
-    # Example for AWAITING_FREQUENCY_CHOICE step:
-    elif current_step_name == UserSteps.AWAITING_FREQUENCY_CHOICE.name:
-        # The top-level cancel check should have handled "Cancel".
-        # If it reaches here, it's not a "Cancel" button.
-        await handle_frequency_choice_text(update, context) # This function handles the frequency choice
-
-    # Example for AWAITING_CLEAR_ALL_CONFIRMATION step:
     elif current_step_name == UserSteps.AWAITING_CLEAR_ALL_CONFIRMATION.name:
-        # The top-level cancel check should have handled "Cancel" if "No" is also treated as cancel.
-        # If "No" needs specific handling different from generic cancel:
-        yes_text = handler_data.translations.get("yes", {}).get(lang, "Yes")
-        no_text = handler_data.translations.get("no", {}).get(lang, "No")
+        yes_text = get_btn_text("yes", "Yes")
+        no_text = get_btn_text("no", "No") # "No" should act like cancel here
 
         if text_received == yes_text:
             handler_data.user_addresses.pop(user_id, None)
-            handler_data.user_notified.pop(user_id, None)
+            handler_data.user_notified.pop(user_id, None) # Clear notified history for this user too
             await save_tracked_data_async(context)
-            await reply_with_main_menu(update, context, "all_addresses_cleared", "All cleared.")
-        elif text_received == no_text: # Explicit "No"
-            await handle_cancel_action(update, context) # Or a more specific "clear_all_cancelled" message
+            await reply_with_main_menu(update, context, "all_addresses_cleared", "All addresses cleared.")
+        elif text_received == no_text:
+            await handle_cancel_action(update, context) # Treat "No" as cancel
         else: # Any other text while awaiting confirmation
             await message.reply_text(
-                handler_data.translations.get("please_confirm_yes_no", {}).get(lang, "Please confirm (Yes/No)."),
+                get_btn_text("please_confirm_yes_no", "Please confirm (Yes/No)."),
                 reply_markup=ReplyKeyboardMarkup([[KeyboardButton(yes_text), KeyboardButton(no_text)]],
                                                  resize_keyboard=True, one_time_keyboard=True)
             )
-        return # Ensure execution stops here for this step
+            # Stay in this step, so no return here unless you want to exit the handler
+        return
 
-    # Ensure all other steps that expect text input are handled.
-    # If a step is only expecting callback queries (like AWAITING_STREET_CONFIRMATION),
-    # text messages during that step might need to be handled or ignored.
+
+    elif current_step_name == UserSteps.AWAITING_REGION_FOR_CHECK.name:
+        log_info(f"[TextMsg AWAITING_REGION_FOR_CHECK] Received region: '{text_received}'.")
+        if text_received not in handler_data.all_known_regions:
+            log_warning(f"Invalid region '{text_received}' selected for check by user {user_id_str}.")
+            await message.reply_text(get_btn_text("error_invalid_region_selection", "Invalid region."), reply_markup=get_region_keyboard(lang, context))
+            return # Stay in this step
+        context.user_data[USER_DATA_SELECTED_REGION_FOR_CHECK] = text_received
+        prompt_text = get_btn_text("enter_street_for_check", "Street to check:")
+        log_info(f"[TextMsg AWAITING_REGION_FOR_CHECK] Prompting for street in lang '{lang}': '{prompt_text}'")
+        await message.reply_text(prompt_text,
+                                 reply_markup=ReplyKeyboardMarkup([[get_btn_text("cancel", "❌ Cancel")]], resize_keyboard=True, one_time_keyboard=True))
+        context.user_data[USER_DATA_STEP] = UserSteps.AWAITING_STREET_FOR_CHECK.name
+        log_info(f"[TextMsg AWAITING_REGION_FOR_CHECK] Step changed to AWAITING_STREET_FOR_CHECK for user {user_id_str}.")
+        return
+
+    elif current_step_name == UserSteps.AWAITING_STREET_FOR_CHECK.name:
+        street_to_check = text_received # Already stripped
+        region_to_check = context.user_data.get(USER_DATA_SELECTED_REGION_FOR_CHECK)
+        if not region_to_check:
+            log_error(f"User {user_id_str} in AWAITING_STREET_FOR_CHECK but no region selected. Resetting.")
+            await handle_cancel_action(update, context)
+            return
+
+        await message.reply_text(get_btn_text("checking_now", "Checking..."), reply_markup=ReplyKeyboardMarkup([[]], remove_keyboard=True))
+        active_shutdowns_details, shutdown_message_template = await is_shutdown_for_address_now_v2(street_to_check, region_to_check, context)
+        
+        # Ensure address_display placeholder is correctly substituted
+        address_display_text = f"{escape_markdown_v2(region_to_check)}, {escape_markdown_v2(street_to_check)}"
+        final_message = shutdown_message_template.replace("{address_display}", address_display_text)
+        
+        await message.reply_text(final_message, reply_markup=reply_markup_for_lang(lang, context), parse_mode=ParseMode.MARKDOWN_V2)
+        
+        context.user_data.pop(USER_DATA_SELECTED_REGION_FOR_CHECK, None)
+        context.user_data[USER_DATA_STEP] = UserSteps.NONE.name # Reset step
+        log_info(f"Check address completed for {user_id_str}. Step reset to NONE.")
+        return
+
+    elif current_step_name == UserSteps.AWAITING_FREQUENCY_CHOICE.name:
+        # Cancel should be handled by the top-level cancel check.
+        # If it's not "Cancel", then it's a frequency choice.
+        await handle_frequency_choice_text(update, context)
+        return 
+
+    elif current_step_name == UserSteps.AWAITING_SILENT_START_TIME.name or \
+         current_step_name == UserSteps.AWAITING_SILENT_END_TIME.name:
+        # Cancel should be handled by the top-level cancel check.
+        await handle_silent_time_input(update, context)
+        return
+
+    # Fallback for unhandled steps or text in callback-only steps
     else:
-        # Handle unexpected text input during steps that primarily expect callbacks
-        # or if a step is missing its text handling logic.
-        if current_step_name not in [
-            UserSteps.AWAITING_LANGUAGE_CHOICE.name, # Expects CallbackQuery
-            UserSteps.AWAITING_STREET_CONFIRMATION.name, # Expects CallbackQuery
-            UserSteps.AWAITING_SUBSCRIPTION_CHOICE.name, # Expects CallbackQuery
-            # UserSteps.AWAITING_SILENT_START_TIME.name, # Expects text, handled by handle_silent_time_input
-            # UserSteps.AWAITING_SILENT_END_TIME.name,   # Expects text, handled by handle_silent_time_input
-        ]:
-            # Check if the step has specific text input handlers like AWAITING_SILENT_START_TIME
-            is_silent_time_step = current_step_name in [UserSteps.AWAITING_SILENT_START_TIME.name, UserSteps.AWAITING_SILENT_END_TIME.name]
+        is_callback_only_step = current_step_name in [
+            UserSteps.AWAITING_LANGUAGE_CHOICE.name,        # Expects CallbackQuery
+            UserSteps.AWAITING_STREET_CONFIRMATION.name,  # Expects CallbackQuery
+            UserSteps.AWAITING_SUBSCRIPTION_CHOICE.name,  # Expects CallbackQuery
+            # UserSteps.AWAITING_FAQ_CHOICE.name, # If you add this
+            # UserSteps.AWAITING_SUPPORT_MESSAGE.name # If you add this
+        ]
 
-            if is_silent_time_step:
-                await handle_silent_time_input(update, context)
-            # Add other specific text handlers for steps here if necessary
-            # elif current_step_name == UserSteps.AWAITING_REGION.name:
-                # ... logic ...
-            else:
-                log_warning(f"Unhandled text input '{text_received}' for step {current_step_name}. User: {user_id_str}. Resetting to main menu.")
-                await reply_with_main_menu(update, context, "unknown_command", "Unknown state. Menu.")
+        if is_callback_only_step:
+            log_info(f"Received text '{text_received}' during a callback-only step {current_step_name} for user {user_id_str}. Informing user.")
+            # You might want to inform the user to use buttons or simply ignore.
+            # For now, let's send to main menu if text is received in such a state.
+            await message.reply_text(get_btn_text("use_buttons_prompt", "Please use the provided buttons or commands."), reply_markup=reply_markup_for_lang(lang,context))
+            context.user_data[USER_DATA_STEP] = UserSteps.NONE.name # Reset to main menu
+        else:
+            log_warning(f"Unhandled text input '{text_received}' for step {current_step_name} (user: {user_id_str}). Resetting to main menu.")
+            await reply_with_main_menu(update, context, "unknown_command", "Unknown state. Menu.")
+        # No return needed, as it's the end of the function.
 
 # --- Функции для установки частоты (интегрированы) ---
 @handler_prechecks
@@ -1454,102 +1621,119 @@ async def periodic_site_check_job(context: ContextTypes.DEFAULT_TYPE):
     log_info(f"Periodic check done. Active: {active_checks} / {len(user_ids_to_check)} eligible.")
 
 
+# In smart_bot.py
 async def handle_address_confirmation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Обработчик нажатий на кнопки подтверждения адреса (Да / Нет / Отмена) после
-    AI-кларификации. 
-    CALLBACK_PREFIX_ADDRESS_CONFIRM — префикс, который вы используете при создании callback_data,
-    например: f"{CALLBACK_PREFIX_ADDRESS_CONFIRM}yes", f"{CALLBACK_PREFIX_ADDRESS_CONFIRM}original", f"{CALLBACK_PREFIX_ADDRESS_CONFIRM}cancel_add".
-    """
     query = update.callback_query
-    if not query:
-        return  # на всякий случай
+    await query.answer() 
 
-    await query.answer()  # закрываем «висящую» иконку ожидания
-
-    # Получаем код после префикса, например: "yes", "original" или "cancel_add"
-    data = query.data[len(CALLBACK_PREFIX_ADDRESS_CONFIRM):]
-
-    handler_data = get_bot_data(context)  # доступ к translations, user_addresses и т. д.
     user_id = query.from_user.id
     lang = get_lang_for_handler(context, user_id)
+    handler_data = get_bot_data(context)
+    
+    # Ensure USER_DATA_CLARIFIED_ADDRESS_CACHE and USER_DATA_SELECTED_REGION exist
+    clarified_cache = context.user_data.get(USER_DATA_CLARIFIED_ADDRESS_CACHE)
+    selected_region_for_add = context.user_data.get(USER_DATA_SELECTED_REGION) # This was from AWAITING_REGION step
 
-    if data == "yes":
-        # Пользователь согласился с вариантом ИИ.
-        clarified = context.user_data.get(USER_DATA_CLARIFIED_ADDRESS_CACHE)
-        if clarified:
-            # Пример: сохраняем в handler_data.user_addresses
-            region = context.user_data.get(USER_DATA_SELECTED_REGION)
-            street_full = " ".join(filter(None, [
-                clarified.get("street_type", ""),
-                clarified.get("street_name", ""),
-                clarified.get("house_number", "")
-            ])).strip()
-
-            # Проверяем дубликаты:
-            user_addrs = handler_data.user_addresses.setdefault(user_id, [])
-            is_duplicate = any(
-                normalize_address_component(addr["street"]) == normalize_address_component(street_full) and
-                normalize_address_component(addr["region"]) == normalize_address_component(region)
-                for addr in user_addrs
-            )
-            if is_duplicate:
-                await query.edit_message_text(
-                    handler_data.translations.get("address_exists", {}).get(lang, "Address already exists."),
-                    reply_markup=reply_markup_for_lang(lang, context)
-                )
-            else:
-                user_addrs.append({"region": region, "street": street_full})
-                await save_tracked_data_async(context)
-                await query.edit_message_text(
-                    handler_data.translations.get("address_added", {}).get(lang, "Address added."),
-                    reply_markup=reply_markup_for_lang(lang, context)
-                )
-        else:
-            # На всякий случай, если кэша нет
-            await query.edit_message_text(
-                handler_data.translations.get("error_ai_cache_missing", {}).get(lang, "Error: no AI data."),
-                reply_markup=reply_markup_for_lang(lang, context)
-            )
-
-    elif data == "original":
-        # Пользователь выбрал «Сохранить то, что ввёл самостоятельно» (игнорируем подсказку ИИ).
-        raw_street = context.user_data.get(USER_DATA_RAW_STREET_INPUT)
-        region = context.user_data.get(USER_DATA_SELECTED_REGION)
-        if raw_street and region:
-            user_addrs = handler_data.user_addresses.setdefault(user_id, [])
-            is_duplicate = any(
-                normalize_address_component(addr["street"]) == normalize_address_component(raw_street) and
-                normalize_address_component(addr["region"]) == normalize_address_component(region)
-                for addr in user_addrs
-            )
-            if is_duplicate:
-                await query.edit_message_text(
-                    handler_data.translations.get("address_exists", {}).get(lang, "Address already exists."),
-                    reply_markup=reply_markup_for_lang(lang, context)
-                )
-            else:
-                user_addrs.append({"region": region, "street": raw_street})
-                await save_tracked_data_async(context)
-                await query.edit_message_text(
-                    handler_data.translations.get("address_added", {}).get(lang, "Address added."),
-                    reply_markup=reply_markup_for_lang(lang, context)
-                )
-        else:
-            await query.edit_message_text(
-                handler_data.translations.get("error_missing_data", {}).get(lang, "Error: missing data."),
-                reply_markup=reply_markup_for_lang(lang, context)
-            )
-
-    else:  # data == "cancel_add" или любой другой непредусмотренный
-        # Возвращаемся в главное меню без сохранения
+    if not clarified_cache or not selected_region_for_add:
+        log_error(f"Missing address confirmation data for user {user_id}. Cache: {clarified_cache}, Region: {selected_region_for_add}")
         await query.edit_message_text(
-            handler_data.translations.get("action_cancelled", {}).get(lang, "Action cancelled."),
-            reply_markup=reply_markup_for_lang(lang, context)
+            handler_data.translations.get("error_missing_data", {}).get(lang, "Error: critical data missing for address confirmation."),
+        ) # No main menu reply here, user might need to restart flow.
+        context.user_data[USER_DATA_STEP] = UserSteps.NONE.name # Reset step
+        return # Early exit
+
+    # Extract action from callback data
+    action = query.data[len(CALLBACK_PREFIX_ADDRESS_CONFIRM):]
+    log_info(f"Address confirmation callback: User {user_id}, Action: {action}, Cache: {clarified_cache}, Region: {selected_region_for_add}")
+
+    street_to_save = None
+    region_to_save = selected_region_for_add # Default to user selected region
+
+    if action == "yes_ai":
+        # User confirmed AI's suggestion
+        if clarified_cache.get("street_identified"):
+            street_to_save = clarified_cache["street_identified"]
+            # Optionally use AI's region if it's different and considered more accurate
+            if clarified_cache.get("region_identified"):
+                region_to_save = clarified_cache["region_identified"]
+            log_info(f"User {user_id} confirmed AI address: Region='{region_to_save}', Street='{street_to_save}'")
+        else:
+            log_warning(f"User {user_id} pressed 'yes_ai' but no street_identified in cache.")
+            # Fallback to original input or error
+            street_to_save = clarified_cache.get("original_input")
+            region_to_save = selected_region_for_add # Revert to originally selected region for safety
+            if not street_to_save:
+                 await query.edit_message_text(handler_data.translations.get("error_ai_cache_missing", {}).get(lang, "Error: AI data incomplete."))
+                 context.user_data[USER_DATA_STEP] = UserSteps.NONE.name
+                 return
+
+
+    elif action == "original_input":
+        # User wants to save their original input
+        street_to_save = clarified_cache.get("original_input")
+        region_to_save = selected_region_for_add # Or use clarified_cache.get("region_identified", selected_region_for_add)
+        log_info(f"User {user_id} chose original address: Region='{region_to_save}', Street='{street_to_save}'")
+        if not street_to_save: # Should always exist if flow is correct
+            log_error(f"User {user_id} pressed 'original_input' but no original_input in cache.")
+            await query.edit_message_text(handler_data.translations.get("error_missing_data", {}).get(lang, "Error: Original input missing."))
+            context.user_data[USER_DATA_STEP] = UserSteps.NONE.name
+            return
+
+    elif action == "cancel_add":
+        log_info(f"User {user_id} cancelled address addition via AI confirmation.")
+        # Edit message first, then send main menu with reply_with_main_menu
+        await query.edit_message_text(
+            handler_data.translations.get("action_cancelled", {}).get(lang, "Action cancelled.")
+        )
+        # Send a new message with the main menu
+        await reply_with_main_menu(update, context, "menu_returned", default_text="Main menu.") # reply_with_main_menu handles step reset
+        return # Important to return as reply_with_main_menu sends a new message
+
+    else:
+        log_warning(f"Unknown address confirmation action: {action} for user {user_id}")
+        await query.edit_message_text(
+            handler_data.translations.get("error_generic", {}).get(lang, "Error: Unknown action.")
+        )
+        context.user_data[USER_DATA_STEP] = UserSteps.NONE.name # Reset step
+        return
+
+    # Proceed to save if street_to_save is determined
+    if street_to_save and region_to_save:
+        user_addrs = handler_data.user_addresses.setdefault(user_id, [])
+        norm_street = normalize_address_component(street_to_save)
+        norm_region = normalize_address_component(region_to_save)
+        
+        is_duplicate = any(
+            normalize_address_component(addr["street"]) == norm_street and
+            normalize_address_component(addr["region"]) == norm_region
+            for addr in user_addrs
         )
 
-    # После любой ветки сбрасываем шаг пользователя:
-    context.user_data[USER_DATA_STEP] = UserSteps.NONE.name
+        if is_duplicate:
+            msg_text = handler_data.translations.get("address_exists", {}).get(lang, "Address already exists.").format(address=f"{region_to_save}, {street_to_save}")
+        else:
+            user_addrs.append({"region": region_to_save, "street": street_to_save})
+            await save_tracked_data_async(context)
+            msg_text = handler_data.translations.get("address_added", {}).get(lang, "Address added.").format(address=f"{region_to_save}, {street_to_save}")
+        
+        await query.edit_message_text(msg_text)
+        # Send a new message with the main menu AFTER editing the current one
+        await reply_with_main_menu(update, context, "menu_returned", default_text="Main menu.")
+    else:
+        # This case should ideally be caught earlier if street_to_save wasn't set.
+        log_error(f"Address confirmation for user {user_id} resulted in no street_to_save. Action: {action}")
+        await query.edit_message_text(handler_data.translations.get("error_final_street_empty", {}).get(lang, "Failed to determine street to save."))
+        await reply_with_main_menu(update, context, "menu_returned", default_text="Main menu.")
+
+
+    # Clean up temporary data from context.user_data
+    context.user_data.pop(USER_DATA_CLARIFIED_ADDRESS_CACHE, None)
+    # USER_DATA_SELECTED_REGION is cleared by reply_with_main_menu or when the flow naturally ends.
+    # No, reply_with_main_menu was modified to clear specific keys. Let's ensure USER_DATA_SELECTED_REGION is cleared too.
+    # It's better if reply_with_main_menu clears all temporary operational keys.
+
+    # The step is reset by reply_with_main_menu or set specifically here if needed.
+    # Since reply_with_main_menu is called, step will be NONE.
 
 
 # --- ХУКИ ИНИЦИАЛИЗАЦИИ И ЗАВЕРШЕНИЯ ---
