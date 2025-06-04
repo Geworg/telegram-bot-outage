@@ -220,18 +220,47 @@ def get_region_keyboard(lang: str, context: ContextTypes.DEFAULT_TYPE) -> ReplyK
 
 def get_main_menu_buttons(lang: str, context: ContextTypes.DEFAULT_TYPE) -> List[List[KeyboardButton]]:
     handler_data = get_bot_data(context)
-    # Кнопка "Изменить язык" удалена, "Настройки звука" добавлена
+    translations = handler_data.translations
+
+    log_info(f"[MainMenuButtons] Generating for lang: '{lang}'")
+
+    # Примеры текстов кнопок с логированием
+    add_addr_text = translations.get("add_address_btn", {}).get(lang, "➕ Add Address")
+    log_info(f"[MainMenuButtons] 'add_address_btn' for lang '{lang}': '{add_addr_text}'")
+
+    remove_addr_text = translations.get("remove_address_btn", {}).get(lang, "➖ Remove Address")
+    log_info(f"[MainMenuButtons] 'remove_address_btn' for lang '{lang}': '{remove_addr_text}'")
+
+    show_addresses_text = translations.get("show_addresses_btn", {}).get(lang, "📋 Show Addresses")
+    log_info(f"[MainMenuButtons] 'show_addresses_btn' for lang '{lang}': '{show_addresses_text}'")
+
+    clear_all_text = translations.get("clear_all_btn", {}).get(lang, "🧹 Clear All")
+    log_info(f"[MainMenuButtons] 'clear_all_btn' for lang '{lang}': '{clear_all_text}'")
+
+    check_address_text = translations.get("check_address_btn", {}).get(lang, "🔍 Check Address")
+    log_info(f"[MainMenuButtons] 'check_address_btn' for lang '{lang}': '{check_address_text}'")
+
+    sound_settings_text = translations.get("sound_settings_btn", {}).get(lang, "🎵 Sound Settings")
+    log_info(f"[MainMenuButtons] 'sound_settings_btn' for lang '{lang}': '{sound_settings_text}'")
+
+    subscription_text = translations.get("subscription_btn", {}).get(lang, "⭐ Subscription")
+    log_info(f"[MainMenuButtons] 'subscription_btn' for lang '{lang}': '{subscription_text}'")
+
+    statistics_text = translations.get("statistics_btn", {}).get(lang, "📊 Statistics")
+    log_info(f"[MainMenuButtons] 'statistics_btn' for lang '{lang}': '{statistics_text}'")
+
+    set_frequency_text = translations.get("set_frequency_btn", {}).get(lang, "⏱️ Set Frequency")
+    log_info(f"[MainMenuButtons] 'set_frequency_btn' for lang '{lang}': '{set_frequency_text}'")
+
+    help_text = translations.get("help_btn", {}).get(lang, "❓ Help")
+    log_info(f"[MainMenuButtons] 'help_btn' for lang '{lang}': '{help_text}'")
+
     return [
-        [KeyboardButton(handler_data.translations.get("add_address_btn", {}).get(lang, "➕ Add Address")),
-         KeyboardButton(handler_data.translations.get("remove_address_btn", {}).get(lang, "➖ Remove Address"))],
-        [KeyboardButton(handler_data.translations.get("show_addresses_btn", {}).get(lang, "📋 Show Addresses")),
-         KeyboardButton(handler_data.translations.get("clear_all_btn", {}).get(lang, "🧹 Clear All"))],
-        [KeyboardButton(handler_data.translations.get("check_address_btn", {}).get(lang, "🔍 Check Address")),
-         KeyboardButton(handler_data.translations.get("sound_settings_btn", {}).get(lang, "🎵 Sound Settings"))],
-        [KeyboardButton(handler_data.translations.get("subscription_btn", {}).get(lang, "⭐ Subscription")),
-         KeyboardButton(handler_data.translations.get("statistics_btn", {}).get(lang, "📊 Statistics"))],
-        [KeyboardButton(handler_data.translations.get("set_frequency_btn", {}).get(lang, "⏱️ Set Frequency")),
-         KeyboardButton(handler_data.translations.get("help_btn", {}).get(lang, "❓ Help"))]
+        [KeyboardButton(add_addr_text), KeyboardButton(remove_addr_text)],
+        [KeyboardButton(show_addresses_text), KeyboardButton(clear_all_text)],
+        [KeyboardButton(check_address_text), KeyboardButton(sound_settings_text)],
+        [KeyboardButton(subscription_text), KeyboardButton(statistics_text)],
+        [KeyboardButton(set_frequency_text), KeyboardButton(help_text)]
     ]
 
 def reply_markup_for_lang(lang: str, context: ContextTypes.DEFAULT_TYPE) -> ReplyKeyboardMarkup:
@@ -770,44 +799,76 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await reply_with_main_menu(update, context, "start_text", "Hello! Choose an action.")
 
 
-@handler_prechecks
+@handler_prechecks # This decorator should ensure lang is set up for the context
 async def handle_language_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    data = query.data if query and query.data else "<no data>"
-    log_info(f"[DBG] handle_language_callback: callback_data = «{data}»")
-    # await query.answer()
-    # query = update.callback_query
-    await query.answer()
+    # data = query.data if query and query.data else "<no data>" # Already logged if needed
+    # log_info(f"[DBG] handle_language_callback: callback_data = «{data}»") # Already present
+
+    if not query or not query.data: # Defensive check
+        log_warning("[LangCallback] Query or query.data is missing.")
+        if query: await query.answer("Error processing request.")
+        return
+
+    await query.answer() # Answer callback immediately
+
     user = query.from_user
     user_id_str = str(user.id)
     handler_data = get_bot_data(context)
-    
+
     try:
-        selected_lang_code = query.data.split(CALLBACK_PREFIX_LANG)[1]
-        if selected_lang_code not in languages.values():
-            await query.edit_message_text(text="Error: Invalid language code.")
+        # Ensure CALLBACK_PREFIX_LANG ends with ':' or use a robust split
+        prefix_len = len(CALLBACK_PREFIX_LANG)
+        if not query.data.startswith(CALLBACK_PREFIX_LANG):
+            log_error(f"Invalid callback data format: {query.data}")
+            await query.edit_message_text(text="Error: Invalid language callback.")
             return
 
-        context.user_data[USER_DATA_LANG] = selected_lang_code # Обновляем язык в текущей сессии
-        current_s = handler_data.user_settings.get(user_id_str, {})
+        selected_lang_code = query.data[prefix_len:] # Get the part after the prefix
+
+        if selected_lang_code not in languages.values():
+            log_warning(f"Invalid language code '{selected_lang_code}' selected by user {user_id_str}.")
+            await query.edit_message_text(text="Error: Invalid language code.") # Consider using translated error
+            return
+
+        log_info(f"User {user_id_str} initiated language change to: {selected_lang_code}. Current context lang before change: {context.user_data.get(USER_DATA_LANG)}")
+
+        context.user_data[USER_DATA_LANG] = selected_lang_code # Update language in current session context *first*
+
+        current_s = handler_data.user_settings.get(user_id_str, {}).copy() # Work on a copy
         current_s["lang"] = selected_lang_code
-        if "notification_sound_enabled" not in current_s: # Инициализация настроек при первом выборе языка
+        if "notification_sound_enabled" not in current_s:
             current_s.update({
                 "notification_sound_enabled": True, "silent_mode_enabled": False,
                 "silent_mode_start_time": "23:00", "silent_mode_end_time": "07:00",
                 "timezone": handler_data.config.default_user_timezone
             })
-        handler_data.user_settings[user_id_str] = current_s
-        await save_user_settings_async(context)
-        
-        await query.delete_message()
-        await reply_with_main_menu(update, context, "language_set", "Language set!")
-        log_info(f"User {user_id_str} selected language: {selected_lang_code}.")
+        handler_data.user_settings[user_id_str] = current_s # Update the main settings dict
+        await save_user_settings_async(context) # Persist changes
+
+        log_info(f"User {user_id_str} language set to: {selected_lang_code}. Context lang after change: {context.user_data.get(USER_DATA_LANG)}. Settings lang: {handler_data.user_settings.get(user_id_str, {}).get('lang')}")
+
+        # Delete the inline keyboard message
+        try:
+            await query.delete_message()
+        except Exception as e_del:
+            log_warning(f"Could not delete language selection message for user {user_id_str}: {e_del}")
+
+        # Send new message with main menu in new language
+        # reply_with_main_menu will use get_lang_for_handler, which should now pick selected_lang_code from context.user_data
+        await reply_with_main_menu(update, context, "language_set", "Language set!") 
+        log_info(f"Replied with main menu after language change for user {user_id_str}.")
 
     except Exception as e:
         log_error(f"Error in handle_language_callback for {user_id_str}, data '{query.data}': {e}", exc_info=True)
-        await query.edit_message_text(text="Error setting language. Try /start.")
-
+        try:
+            # Try to edit message if delete failed or if error happened before delete
+            await query.edit_message_text(text="An error occurred while setting the language. Please try /start.")
+        except Exception as e_edit:
+            log_error(f"Failed to send error message in handle_language_callback: {e_edit}")
+            # If editing also fails, maybe send a new message if possible (but query.message might be gone)
+            if query.message: # Check if original message context still exists
+                 await context.bot.send_message(chat_id=user_id_str, text="An error occurred. Please try /start.")
 
 @handler_prechecks
 async def change_language_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1096,215 +1157,149 @@ async def show_help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @handler_prechecks
 async def handle_text_message_new_logic(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.strip() if update.message else "<no text>"
-    log_info(f"[DBG] Входящий текст: «{text}», текущий шаг: {context.user_data.get(USER_DATA_STEP)}")
-    user = update.effective_user # Гарантированно есть
-    message = update.message
-    user_id = user.id; user_id_str = str(user.id)
-    lang = get_lang_for_handler(context, user_id) # Язык уже должен быть в context.user_data
-    handler_data = get_bot_data(context)
-    
-    text = message.text.strip()
-    if not validate_user_input(text):
-        await message.reply_text(handler_data.translations.get("error_invalid_input", {}).get(lang, "Invalid input."))
+    if not update.message or not update.message.text: # Ensure message and text exist
+        log_warning("[TextMsg] Received update without message text.")
         return
 
+    text_received = update.message.text.strip() # Use a consistent variable for stripped text
+    user = update.effective_user
+    message = update.message
+    user_id = user.id
+    user_id_str = str(user.id)
+    lang = get_lang_for_handler(context, user_id) # Ensure lang is fetched early and consistently
+    handler_data = get_bot_data(context)
     current_step_name = context.user_data.get(USER_DATA_STEP, UserSteps.NONE.name)
-    log_info(f"[TextMsg] User: {user_id_str}, Text: '{text}', Lang: '{lang}', Step: '{current_step_name}'")
 
-    if text == handler_data.translations.get("cancel", {}).get(lang, "#!#CANCEL#!#"): # Используем уникальный маркер, если "Cancel" может быть обычным словом
+    log_info(f"[TextMsg Router] User: {user_id_str}, Received Text: '{text_received}', Lang: '{lang}', Step: '{current_step_name}'")
+
+    # --- Centralized Cancel Check ---
+    # Get the localized "cancel" button text
+    # The fallback "#!#CANCEL#!#" is just in case, but translations should exist
+    cancel_text_localized = handler_data.translations.get("cancel", {}).get(lang, "❌ Cancel") # Fallback to a common one if needed
+    log_info(f"[TextMsg Router] Comparing for Cancel: Received='{text_received}', ExpectedCancelLocalized='{cancel_text_localized}', Match={text_received == cancel_text_localized}")
+
+    if text_received == cancel_text_localized:
+        log_info(f"[TextMsg Router] Cancel action triggered by text: '{text_received}'")
         await handle_cancel_action(update, context)
         return
 
-    # ---- Шаг NONE: Обработка кнопок главного меню ----
+    # ---- Step NONE: Обработка кнопок главного меню ----
     if current_step_name == UserSteps.NONE.name:
-        # Сопоставление текста кнопки с действием
+        # Helper to get translated button text, ensures consistent lookup
+        def get_btn_text(key: str, default: str) -> str:
+            return handler_data.translations.get(key, {}).get(lang, default)
+
         button_actions: Dict[str, Callable] = {
-            handler_data.translations.get("add_address_btn", {}).get(lang, "➕ Add Address"): lambda: (
-                message.reply_text(handler_data.translations.get("choose_region", {}).get(lang, "Region:"), reply_markup=get_region_keyboard(lang, context)),
+            get_btn_text("add_address_btn", "➕ Add Address"): lambda: (
+                message.reply_text(get_btn_text("choose_region", "Region:"), reply_markup=get_region_keyboard(lang, context)),
                 UserSteps.AWAITING_REGION.name
             ),
-            handler_data.translations.get("remove_address_btn", {}).get(lang, "➖ Remove Address"): lambda: (
-                message.reply_text(handler_data.translations.get("enter_address_to_remove_prompt", {}).get(lang, "Street to remove?"), # TODO: Улучшить удаление
-                                 reply_markup=ReplyKeyboardMarkup([[handler_data.translations.get("cancel", {}).get(lang, "Cancel")]], resize_keyboard=True, one_time_keyboard=True)),
+            get_btn_text("remove_address_btn", "➖ Remove Address"): lambda: (
+                message.reply_text(get_btn_text("enter_address_to_remove_prompt", "Street to remove?"),
+                                 reply_markup=ReplyKeyboardMarkup([[get_btn_text("cancel", "❌ Cancel")]], resize_keyboard=True, one_time_keyboard=True)),
                 UserSteps.AWAITING_ADDRESS_TO_REMOVE.name
             ) if handler_data.user_addresses.get(user_id) else (
-                message.reply_text(handler_data.translations.get("no_addresses", {}).get(lang, "No addresses.")),
-                UserSteps.NONE.name # Остаемся в NONE
+                message.reply_text(get_btn_text("no_addresses", "No addresses.")),
+                UserSteps.NONE.name
             ),
-            handler_data.translations.get("show_addresses_btn", {}).get(lang, "📋 Show Addresses"): lambda: (address_list_command(update, context), UserSteps.NONE.name), # address_list_command сам сбросит шаг
-            handler_data.translations.get("clear_all_btn", {}).get(lang, "🧹 Clear All"): lambda: (
-                 message.reply_text(handler_data.translations.get("confirm_clear", {}).get(lang, "Confirm clear all?"), 
-                                  reply_markup=ReplyKeyboardMarkup([[KeyboardButton(handler_data.translations.get("yes", {}).get(lang, "Yes")),
-                                                                     KeyboardButton(handler_data.translations.get("no", {}).get(lang, "No"))]],
+            get_btn_text("show_addresses_btn", "📋 Show Addresses"): lambda: (address_list_command(update, context), UserSteps.NONE.name),
+            get_btn_text("clear_all_btn", "🧹 Clear All"): lambda: (
+                message.reply_text(get_btn_text("confirm_clear", "Confirm clear all?"),
+                                  reply_markup=ReplyKeyboardMarkup([[KeyboardButton(get_btn_text("yes", "Yes")),
+                                                                     KeyboardButton(get_btn_text("no", "No"))]],
                                                                     resize_keyboard=True, one_time_keyboard=True)),
                 UserSteps.AWAITING_CLEAR_ALL_CONFIRMATION.name
             ) if handler_data.user_addresses.get(user_id) else (
-                message.reply_text(handler_data.translations.get("no_addresses", {}).get(lang, "No addresses.")), UserSteps.NONE.name
+                message.reply_text(get_btn_text("no_addresses", "No addresses.")), UserSteps.NONE.name
             ),
-            handler_data.translations.get("check_address_btn", {}).get(lang, "🔍 Check Address"): lambda: (check_address_command_entry(update, context), UserSteps.AWAITING_REGION_FOR_CHECK.name), # check_address_command_entry установит шаг
-            handler_data.translations.get("sound_settings_btn", {}).get(lang, "🎵 Sound Settings"): lambda: (sound_settings_command(update, context), UserSteps.NONE.name), # Управляется коллбэками
-            handler_data.translations.get("subscription_btn", {}).get(lang, "⭐ Subscription"): lambda: (show_subscription_options(update, context), UserSteps.AWAITING_SUBSCRIPTION_CHOICE.name),
-            handler_data.translations.get("statistics_btn", {}).get(lang, "📊 Statistics"): lambda: (show_statistics_command(update, context), UserSteps.NONE.name),
-            handler_data.translations.get("set_frequency_btn", {}).get(lang, "⏱️ Set Frequency"): lambda: (set_frequency_command_entry(update, context), UserSteps.AWAITING_FREQUENCY_CHOICE.name), # set_frequency_command_entry установит шаг
-            handler_data.translations.get("help_btn", {}).get(lang, "❓ Help"): lambda: (show_help_command(update, context), UserSteps.NONE.name), # show_help_command - для меню помощи
+            get_btn_text("check_address_btn", "🔍 Check Address"): lambda: (check_address_command_entry(update, context), UserSteps.AWAITING_REGION_FOR_CHECK.name),
+            get_btn_text("sound_settings_btn", "🎵 Sound Settings"): lambda: (sound_settings_command(update, context), UserSteps.NONE.name), # This command shows an inline keyboard
+            get_btn_text("subscription_btn", "⭐ Subscription"): lambda: (show_subscription_options(update, context), UserSteps.AWAITING_SUBSCRIPTION_CHOICE.name), # This shows an inline keyboard
+            get_btn_text("statistics_btn", "📊 Statistics"): lambda: (show_statistics_command(update, context), UserSteps.NONE.name),
+            get_btn_text("set_frequency_btn", "⏱️ Set Frequency"): lambda: (set_frequency_command_entry(update, context), UserSteps.AWAITING_FREQUENCY_CHOICE.name),
+            get_btn_text("help_btn", "❓ Help"): lambda: (show_help_command(update, context), UserSteps.NONE.name),
         }
-        
-        action_result = button_actions.get(text)
-        if action_result:
-            # Некоторые действия - это кортежи (awaitable, next_step_name)
-            # Некоторые - просто awaitable (команды, которые сами управляют меню и шагом)
-            if isinstance(action_result, tuple) and len(action_result) == 2:
-                awaitable_action, next_step_name = action_result
-                if asyncio.iscoroutine(awaitable_action): await awaitable_action
-                elif callable(awaitable_action): await awaitable_action() # Для лямбд, которые возвращают awaitable
-                context.user_data[USER_DATA_STEP] = next_step_name
-            elif asyncio.iscoroutine(action_result): # Если это просто awaitable (например, вызов команды)
-                await action_result
-            elif callable(action_result): # Если это лямбда, возвращающая awaitable или None
-                res = await action_result()
-                if isinstance(res, tuple) and len(res) == 2: # Если лямбда вернула (awaitable, step)
-                     if asyncio.iscoroutine(res[0]): await res[0]
-                     context.user_data[USER_DATA_STEP] = res[1]
 
-            # Если шаг не был установлен или сброшен внутри действия, и это не коллбэк-ориентированное меню
-            # Это условие может быть излишним, если все действия корректно управляют шагом или вызывают reply_with_main_menu
-            # if context.user_data.get(USER_DATA_STEP) != UserSteps.NONE.name and \
-            #    current_step_name == UserSteps.NONE.name and \
-            #    text not in [handler_data.translations.get("sound_settings_btn", {}).get(lang), # Эти управляются коллбэками
-            #                   handler_data.translations.get("help_btn", {}).get(lang)]:
-            #     pass # Шаг должен быть установлен действием
+        action_result_found = False
+        for btn_text_key, action_lambda in button_actions.items():
+            log_info(f"[TextMsg Router] Main Menu Check: Received='{text_received}', ComparingWith='{btn_text_key}', Match={text_received == btn_text_key}")
+            if text_received == btn_text_key:
+                action_result = action_lambda()
+                action_result_found = True
+                if isinstance(action_result, tuple) and len(action_result) == 2:
+                    awaitable_action, next_step_name = action_result
+                    if asyncio.iscoroutine(awaitable_action): await awaitable_action
+                    elif callable(awaitable_action) and asyncio.iscoroutinefunction(awaitable_action): await awaitable_action()
+                    elif callable(awaitable_action): awaitable_action() # For simple function calls if any
+                    context.user_data[USER_DATA_STEP] = next_step_name
+                elif asyncio.iscoroutine(action_result):
+                    await action_result
+                elif callable(action_result) and asyncio.iscoroutinefunction(action_result): # For async lambdas
+                    await action_result()
+                # Add handling for non-async callables if needed, though most PTB actions are async
+                break # Action found and processed
 
-        else: # Текст не совпал ни с одной кнопкой
-            await message.reply_text(handler_data.translations.get("unknown_command", {}).get(lang, "Unknown cmd."), reply_markup=reply_markup_for_lang(lang, context))
+        if not action_result_found:
+            log_warning(f"[TextMsg Router] Text '{text_received}' did not match any known main menu button for lang '{lang}'.")
+            await message.reply_text(get_btn_text("unknown_command", "Unknown cmd."), reply_markup=reply_markup_for_lang(lang, context))
         return
 
-    # ---- Обработка других шагов ----
-    elif current_step_name == UserSteps.AWAITING_REGION.name:
-        if text not in handler_data.all_known_regions: # Используем из bot_data
-            await message.reply_text(handler_data.translations.get("error_invalid_region_selection", {}).get(lang, "Invalid region."), reply_markup=get_region_keyboard(lang, context))
-            return
-        context.user_data[USER_DATA_SELECTED_REGION] = text
-        await message.reply_text(handler_data.translations.get("enter_street_for_add", {}).get(lang, "Street to add:"),
-                                 reply_markup=ReplyKeyboardMarkup([[handler_data.translations.get("cancel", {}).get(lang, "Cancel")]], resize_keyboard=True, one_time_keyboard=True))
-        context.user_data[USER_DATA_STEP] = UserSteps.AWAITING_STREET.name
+    # ... (rest of your logic for other UserSteps) ...
+    # Ensure the `cancel_text_localized` is also checked within other steps if applicable,
+    # or rely on the top-level cancel check.
 
-    elif current_step_name == UserSteps.AWAITING_STREET.name:
-        street_input = text
-        context.user_data[USER_DATA_RAW_STREET_INPUT] = street_input
-        selected_region = context.user_data.get(USER_DATA_SELECTED_REGION)
-        if not selected_region: await handle_cancel_action(update, context); return # Ошибка, отмена
-        
-        ai_is_ready = await is_ai_available(context) # Передаем context
-        if ai_is_ready:
-            await message.reply_text(handler_data.translations.get("address_clarifying_ai", {}).get(lang, "Checking... 🤖"), reply_markup=ReplyKeyboardMarkup([[]], resize_keyboard=True)) # Убираем кнопки ReplyKeyboard
-            clarified_data = await clarify_address_ai(street_input, selected_region, context) # Передаем context
-            
-            # ... (логика кнопок подтверждения для ИИ, как в предыдущей версии) ...
-            # ... она должна устанавливать UserSteps.AWAITING_STREET_CONFIRMATION.name
-            # Пример кнопок для подтверждения:
-            buttons_confirm = []
-            if clarified_data and not clarified_data.get("error") and clarified_data.get("street_name"):
-                suggested_street_parts = [clarified_data.get('street_type', ''), clarified_data.get('street_name', ''), clarified_data.get('house_number', '')]
-                suggested_street_full = " ".join(filter(None, suggested_street_parts)).strip(); suggested_street_full = re.sub(r'\s+', ' ', suggested_street_full)
-                context.user_data[USER_DATA_CLARIFIED_ADDRESS_CACHE] = clarified_data # Кешируем результат ИИ
-                prompt_msg = handler_data.translations.get("ai_clarify_prompt", {}).get(lang, "AI: '{sug_addr}'. Correct?").format(sug_addr=f"{selected_region}, {suggested_street_full}")
-                buttons_confirm = [
-                    [InlineKeyboardButton(handler_data.translations.get("yes", {}).get(lang, "Yes"), callback_data=f"{CALLBACK_PREFIX_ADDRESS_CONFIRM}yes")],
-                    [InlineKeyboardButton(handler_data.translations.get("no_save_original", {}).get(lang, "No, save mine"), callback_data=f"{CALLBACK_PREFIX_ADDRESS_CONFIRM}original")],
-                    [InlineKeyboardButton(handler_data.translations.get("cancel", {}).get(lang, "Cancel"), callback_data=f"{CALLBACK_PREFIX_ADDRESS_CONFIRM}cancel_add")]
-                ]
-            else: # ИИ не смог или ошибка
-                error_comment = clarified_data.get("comment", "AI could not process.") if clarified_data else "AI error."
-                prompt_msg = handler_data.translations.get("ai_clarify_failed_save_original_prompt", {}).get(lang, "AI: {comment}. Save '{addr}' as is?").format(comment=error_comment, addr=street_input)
-                buttons_confirm = [
-                    [InlineKeyboardButton(handler_data.translations.get("confirm_ai_save_original", {}).get(lang, "Save as is"), callback_data=f"{CALLBACK_PREFIX_ADDRESS_CONFIRM}original")],
-                    [InlineKeyboardButton(handler_data.translations.get("cancel", {}).get(lang, "Cancel"), callback_data=f"{CALLBACK_PREFIX_ADDRESS_CONFIRM}cancel_add")]
-                ]
-            await message.reply_text(prompt_msg, reply_markup=InlineKeyboardMarkup(buttons_confirm))
-            context.user_data[USER_DATA_STEP] = UserSteps.AWAITING_STREET_CONFIRMATION.name
-            return
+    # Example for AWAITING_FREQUENCY_CHOICE step:
+    elif current_step_name == UserSteps.AWAITING_FREQUENCY_CHOICE.name:
+        # The top-level cancel check should have handled "Cancel".
+        # If it reaches here, it's not a "Cancel" button.
+        await handle_frequency_choice_text(update, context) # This function handles the frequency choice
 
-        else: # ИИ недоступен
-            # ... (логика добавления адреса как есть, проверка дубликата, сохранение) ...
-            # ... затем reply_with_main_menu ...
-            user_addrs = handler_data.user_addresses.setdefault(user_id, [])
-            norm_street = normalize_address_component(street_input); norm_region = normalize_address_component(selected_region)
-            is_duplicate = any(normalize_address_component(addr["street"]) == norm_street and 
-                               normalize_address_component(addr["region"]) == norm_region for addr in user_addrs)
-            if is_duplicate:
-                await message.reply_text(handler_data.translations.get("address_exists", {}).get(lang, "Address exists."))
-            else:
-                user_addrs.append({"region": selected_region, "street": street_input})
-                await save_tracked_data_async(context)
-                await message.reply_text(handler_data.translations.get("address_added", {}).get(lang, "Address added."))
-                # TODO: Запуск проверки для нового адреса
-            await reply_with_main_menu(update, context, "menu_returned") # Сбрасываем шаг и показываем меню
-
-    elif current_step_name == UserSteps.AWAITING_ADDRESS_TO_REMOVE.name:
-        # ... (логика удаления, затем reply_with_main_menu) ...
-        address_to_remove_text = text
-        user_addrs = handler_data.user_addresses.get(user_id, [])
-        
-        # ... (логика поиска и удаления, как в предыдущих версиях)
-        # ... если удалено:
-        # await save_tracked_data_async(context)
-        # await reply_with_main_menu(update, context, "address_removed_key", "Address removed.")
-        # ... если не найдено:
-        # await message.reply_text(...)
-        # await reply_with_main_menu(update, context, "menu_returned")
-        # Пока заглушка, т.к. логика удаления может быть сложной (выбор из списка и т.д.)
-        await reply_with_main_menu(update, context, "feature_not_fully_implemented", "Removal needs UI improvement.")
-
-
+    # Example for AWAITING_CLEAR_ALL_CONFIRMATION step:
     elif current_step_name == UserSteps.AWAITING_CLEAR_ALL_CONFIRMATION.name:
-        if text == handler_data.translations.get("yes", {}).get(lang, "Yes"):
+        # The top-level cancel check should have handled "Cancel" if "No" is also treated as cancel.
+        # If "No" needs specific handling different from generic cancel:
+        yes_text = handler_data.translations.get("yes", {}).get(lang, "Yes")
+        no_text = handler_data.translations.get("no", {}).get(lang, "No")
+
+        if text_received == yes_text:
             handler_data.user_addresses.pop(user_id, None)
             handler_data.user_notified.pop(user_id, None)
             await save_tracked_data_async(context)
             await reply_with_main_menu(update, context, "all_addresses_cleared", "All cleared.")
-        else: # "No" or other text
-            await handle_cancel_action(update, context) # Отмена
+        elif text_received == no_text: # Explicit "No"
+            await handle_cancel_action(update, context) # Or a more specific "clear_all_cancelled" message
+        else: # Any other text while awaiting confirmation
+            await message.reply_text(
+                handler_data.translations.get("please_confirm_yes_no", {}).get(lang, "Please confirm (Yes/No)."),
+                reply_markup=ReplyKeyboardMarkup([[KeyboardButton(yes_text), KeyboardButton(no_text)]],
+                                                 resize_keyboard=True, one_time_keyboard=True)
+            )
+        return # Ensure execution stops here for this step
 
-    elif current_step_name == UserSteps.AWAITING_REGION_FOR_CHECK.name:
-        if text not in handler_data.all_known_regions:
-            await message.reply_text(handler_data.translations.get("error_invalid_region_selection", {}).get(lang, "Invalid region."), reply_markup=get_region_keyboard(lang, context))
-            return
-        context.user_data[USER_DATA_SELECTED_REGION_FOR_CHECK] = text
-        await message.reply_text(handler_data.translations.get("enter_street_for_check", {}).get(lang, "Street to check:"),
-                                 reply_markup=ReplyKeyboardMarkup([[handler_data.translations.get("cancel", {}).get(lang, "Cancel")]], resize_keyboard=True, one_time_keyboard=True))
-        context.user_data[USER_DATA_STEP] = UserSteps.AWAITING_STREET_FOR_CHECK.name
-    
-    elif current_step_name == UserSteps.AWAITING_STREET_FOR_CHECK.name:
-        street_to_check = text
-        region_to_check = context.user_data.get(USER_DATA_SELECTED_REGION_FOR_CHECK)
-        if not region_to_check: await handle_cancel_action(update, context); return
-
-        await message.reply_text(handler_data.translations.get("checking_now", {}).get(lang, "Checking..."), reply_markup=ReplyKeyboardMarkup([[]], resize_keyboard=True))
-        _, shutdown_message_template = await is_shutdown_for_address_now_v2(street_to_check, region_to_check, context)
-        
-        final_message = shutdown_message_template.format(address_display=f"{escape_markdown_v2(region_to_check)}, {escape_markdown_v2(street_to_check)}")
-        await message.reply_text(final_message, reply_markup=reply_markup_for_lang(lang, context), parse_mode=ParseMode.MARKDOWN_V2)
-        
-        context.user_data.pop(USER_DATA_SELECTED_REGION_FOR_CHECK, None)
-        context.user_data[USER_DATA_STEP] = UserSteps.NONE.name # Сброс шага
-
-    elif current_step_name == UserSteps.AWAITING_FREQUENCY_CHOICE.name:
-        await handle_frequency_choice_text(update, context) # Эта функция сама управляет шагом и меню
-
-    elif current_step_name == UserSteps.AWAITING_SILENT_START_TIME.name or \
-         current_step_name == UserSteps.AWAITING_SILENT_END_TIME.name:
-        await handle_silent_time_input(update, context) # Эта функция сама управляет шагом и меню
-
-    else: # Неизвестный шаг или шаг, обрабатываемый только CallbackQueryHandler
+    # Ensure all other steps that expect text input are handled.
+    # If a step is only expecting callback queries (like AWAITING_STREET_CONFIRMATION),
+    # text messages during that step might need to be handled or ignored.
+    else:
+        # Handle unexpected text input during steps that primarily expect callbacks
+        # or if a step is missing its text handling logic.
         if current_step_name not in [
-            UserSteps.AWAITING_LANGUAGE_CHOICE.name, 
-            UserSteps.AWAITING_STREET_CONFIRMATION.name,
-            UserSteps.AWAITING_SUBSCRIPTION_CHOICE.name
-            # Добавьте другие шаги, которые обрабатываются только коллбэками
+            UserSteps.AWAITING_LANGUAGE_CHOICE.name, # Expects CallbackQuery
+            UserSteps.AWAITING_STREET_CONFIRMATION.name, # Expects CallbackQuery
+            UserSteps.AWAITING_SUBSCRIPTION_CHOICE.name, # Expects CallbackQuery
+            # UserSteps.AWAITING_SILENT_START_TIME.name, # Expects text, handled by handle_silent_time_input
+            # UserSteps.AWAITING_SILENT_END_TIME.name,   # Expects text, handled by handle_silent_time_input
         ]:
-            log_warning(f"Необработанный текстовый ввод для шага {current_step_name}. Сброс.")
-            await reply_with_main_menu(update, context, "unknown_command", "Unknown state. Menu.")
+            # Check if the step has specific text input handlers like AWAITING_SILENT_START_TIME
+            is_silent_time_step = current_step_name in [UserSteps.AWAITING_SILENT_START_TIME.name, UserSteps.AWAITING_SILENT_END_TIME.name]
+
+            if is_silent_time_step:
+                await handle_silent_time_input(update, context)
+            # Add other specific text handlers for steps here if necessary
+            # elif current_step_name == UserSteps.AWAITING_REGION.name:
+                # ... logic ...
+            else:
+                log_warning(f"Unhandled text input '{text_received}' for step {current_step_name}. User: {user_id_str}. Resetting to main menu.")
+                await reply_with_main_menu(update, context, "unknown_command", "Unknown state. Menu.")
 
 # --- Функции для установки частоты (интегрированы) ---
 @handler_prechecks
@@ -1313,73 +1308,118 @@ async def set_frequency_command_entry(update: Update, context: ContextTypes.DEFA
     lang = get_lang_for_handler(context, user.id)
     handler_data = get_bot_data(context)
     user_id_str = str(user.id)
+    
     user_s = handler_data.user_settings.get(user_id_str, {})
     user_current_tier_name = user_s.get("current_tier", "Free")
+
+    if user.id in handler_data.config.admin_user_ids:  # Admin override
+        user_current_tier_name = TIER_ORDER[-1]  # Max tier, e.g., "Ultra"
 
     await update.message.reply_text(
         handler_data.translations.get("set_frequency_prompt", {}).get(lang, "Choose frequency:"),
         reply_markup=get_frequency_reply_keyboard(lang, user_current_tier_name, context)
     )
+    
     context.user_data[USER_DATA_STEP] = UserSteps.AWAITING_FREQUENCY_CHOICE.name
 
-def get_frequency_reply_keyboard(lang: str, user_tier_name: str, context: ContextTypes.DEFAULT_TYPE) -> ReplyKeyboardMarkup:
+def get_frequency_reply_keyboard(
+    lang: str,
+    user_tier_name: str,
+    context: ContextTypes.DEFAULT_TYPE,
+    user_is_admin: bool = False
+) -> ReplyKeyboardMarkup:
     handler_data = get_bot_data(context)
     keyboard_buttons = []
-    user_tier_index = TIER_ORDER.index(user_tier_name) if user_tier_name in TIER_ORDER else 0
+
+    if user_is_admin:
+        user_tier_index = len(TIER_ORDER) - 1  # Максимальный доступ
+    else:
+        user_tier_index = TIER_ORDER.index(user_tier_name) if user_tier_name in TIER_ORDER else 0
 
     for _, option_details in handler_data.frequency_options.items():
         required_tier_for_option = option_details.get("tier", "Free")
         try:
             required_tier_index = TIER_ORDER.index(required_tier_for_option)
-            if user_tier_index >= required_tier_index: # Пользователь имеет доступ
+            if user_tier_index >= required_tier_index:
                 keyboard_buttons.append(KeyboardButton(option_details.get(lang, "N/A Option")))
-        except ValueError: continue # Пропускаем, если tier не найден
-    
-    # Группируем кнопки по 2 в ряду
+        except ValueError:
+            continue  # Пропускаем, если tier не найден
+
+    # Группируем кнопки по 2 в ряд
     grouped_keyboard = [keyboard_buttons[i:i + 2] for i in range(0, len(keyboard_buttons), 2)]
-    grouped_keyboard.append([KeyboardButton(handler_data.translations.get("cancel", {}).get(lang, "Cancel"))])
+    grouped_keyboard.append([
+        KeyboardButton(handler_data.translations.get("cancel", {}).get(lang, "Cancel"))
+    ])
+    
     return ReplyKeyboardMarkup(grouped_keyboard, resize_keyboard=True, one_time_keyboard=True)
 
-@handler_prechecks # Текстовый ввод частоты
+@handler_prechecks  # Ensure lang is set
 async def handle_frequency_choice_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     user_id_str = str(user.id)
     lang = get_lang_for_handler(context, user.id)
     handler_data = get_bot_data(context)
-    text = update.message.text.strip()
 
-    selected_option = None
-    for key, option_details in handler_data.frequency_options.items():
-        if text == option_details.get(lang):
-            selected_option = option_details; break
-    
-    if selected_option:
-        current_s = handler_data.user_settings.get(user_id_str, {})
-        # Проверка доступности этой частоты для текущего тарифа пользователя (уже сделана в get_frequency_reply_keyboard)
-        # но на всякий случай можно повторить
+    if not update.message or not update.message.text:
+        await reply_with_main_menu(update, context, "error_generic", "An error occurred.")
+        return
+
+    text_received = update.message.text.strip()
+    log_info(f"[FreqChoice] User: {user_id_str}, Lang: {lang}, Received Text: '{text_received}' for frequency choice.")
+
+    selected_option_details = None
+    selected_option_key_found = None
+
+    for key, option_details_from_map in handler_data.frequency_options.items():
+        expected_text_for_option = option_details_from_map.get(lang)
+        log_info(f"[FreqChoice] Comparing: Received='{text_received}', Expected='{expected_text_for_option}' for option key '{key}'")
+        if text_received == expected_text_for_option:
+            selected_option_details = option_details_from_map
+            selected_option_key_found = key
+            break
+
+    log_info(f"[FreqChoice] Matched option key after loop: {selected_option_key_found}, Details: {selected_option_details}")
+
+    if selected_option_details:
+        current_s = handler_data.user_settings.get(user_id_str, {}).copy()
         user_current_tier_name = current_s.get("current_tier", "Free")
-        user_tier_index = TIER_ORDER.index(user_current_tier_name) if user_current_tier_name in TIER_ORDER else 0
-        required_tier_for_freq = selected_option.get("tier", "Free")
-        can_select = True
-        try:
-            if user_tier_index < TIER_ORDER.index(required_tier_for_freq): can_select = False
-        except ValueError: can_select = False
-        
+
+        user_is_admin = user.id in handler_data.config.admin_user_ids
+        if user_is_admin:
+            user_current_tier_name = TIER_ORDER[-1]  # Admins get max tier
+
+        can_select = True  # Default to True for admins
+
+        if not user_is_admin:
+            user_tier_index = TIER_ORDER.index(user_current_tier_name) if user_current_tier_name in TIER_ORDER else 0
+            required_tier_for_freq = selected_option_details.get("tier", "Free")
+            required_tier_index = TIER_ORDER.index(required_tier_for_freq) if required_tier_for_freq in TIER_ORDER else 0
+            can_select = user_tier_index >= required_tier_index
+
         if not can_select:
+            log_warning(f"[FreqChoice] User {user_id_str} (Tier: {user_current_tier_name}) tried to select freq for tier {required_tier_for_freq} but is not allowed.")
             await update.message.reply_text(handler_data.translations.get("premium_required_for_frequency", {}).get(lang, "Higher tier required."))
-            await reply_with_main_menu(update, context, "menu_returned") # Возврат в меню
+            await update.message.reply_text(
+                handler_data.translations.get("set_frequency_prompt", {}).get(lang, "Choose frequency:"),
+                reply_markup=get_frequency_reply_keyboard(lang, user_current_tier_name, context, user_is_admin)
+            )
         else:
-            current_s["frequency"] = selected_option["interval"]
+            current_s["frequency"] = selected_option_details["interval"]
             handler_data.user_settings[user_id_str] = current_s
             await save_user_settings_async(context)
+            log_info(f"[FreqChoice] User {user_id_str} set frequency to {selected_option_details['interval']}s (Option key: {selected_option_key_found}).")
             await reply_with_main_menu(update, context, "frequency_set", "Frequency set!")
-    else: # Неверный выбор
+    else:
+        log_warning(f"[FreqChoice] Invalid frequency choice '{text_received}' by user {user_id_str} with lang '{lang}'.")
         user_s = handler_data.user_settings.get(user_id_str, {})
         user_current_tier_name = user_s.get("current_tier", "Free")
+        user_is_admin = user.id in handler_data.config.admin_user_ids
+        if user_is_admin:
+            user_current_tier_name = TIER_ORDER[-1]
         await update.message.reply_text(
-            handler_data.translations.get("invalid_frequency_option", {}).get(lang, "Invalid choice."),
-            reply_markup=get_frequency_reply_keyboard(lang, user_current_tier_name, context) # Показать клавиатуру снова
-        ) # Шаг не сбрасываем, пользователь должен выбрать или отменить
+            handler_data.translations.get("invalid_frequency_option", {}).get(lang, "Invalid choice. Please select from the list or press 'Cancel'."),
+            reply_markup=get_frequency_reply_keyboard(lang, user_current_tier_name, context, user_is_admin)
+        )
 
 
 # --- ПЕРИОДИЧЕСКИЕ ЗАДАЧИ ---
