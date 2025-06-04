@@ -36,6 +36,7 @@ if os.getenv("MAINTENANCE_MODE", "false").lower() == "true":
     print("🚧 Приложение в режиме обслуживания. Остановка.")
     sys.exit(1)
 
+
 # --- КОНСТАНТЫ ---
 class UserSteps(Enum):
     NONE = auto()
