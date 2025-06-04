@@ -21,20 +21,19 @@ from telegram.constants import ParseMode
 from telegram.error import Forbidden, RetryAfter, TimedOut, NetworkError
 
 from logger import log_info, log_error, log_warning
-from translations import translations # Assuming this is your primary translations source
-# Parsers are assumed to be correctly imported and functional
+from translations import translations
 from parse_water import parse_all_water_announcements_async
 from parse_gas import parse_all_gas_announcements_async
 from parse_electric import parse_all_electric_announcements_async
-from ai_engine import clarify_address_ai, is_ai_available, MODEL_PATH as AI_MODEL_PATH # Ensure these are correctly used
+from ai_engine import clarify_address_ai, is_ai_available, MODEL_PATH as AI_MODEL_PATH
 
 import aiofiles
 import aiofiles.os as aios
 from pathlib import Path
 
-if os.getenv("MAINTENANCE_MODE", "false").lower() == "true":
-    print("🚧 Приложение в режиме обслуживания. Остановка.")
-    sys.exit(1)
+# if os.getenv("MAINTENANCE_MODE", "false").lower() == "true":
+#     print("🚧 Приложение в режиме обслуживания. Остановка.")
+#     sys.exit(1)
 
 
 # --- КОНСТАНТЫ ---
