@@ -65,9 +65,9 @@ from parse_water import parse_all_water_announcements_async
 from translations import translations
 
 
-# if os.getenv("MAINTENANCE_MODE", "false").lower() == "true":
-#     print("🚧 Приложение в режиме обслуживания. Остановка.")
-#     sys.exit(1)
+if os.getenv("MAINTENANCE_MODE", "false").lower() == "true":
+    print("🚧 Приложение в режиме обслуживания. Остановка.")
+    sys.exit(1)
 
 # tokenizer = AutoTokenizer.from_pretrained("Helsinki-NLP/opus-mt-hy-en")
 # model = AutoModelForSeq2SeqLM.from_pretrained("Helsinki-NLP/opus-mt-hy-en")
