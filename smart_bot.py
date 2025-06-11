@@ -1,45 +1,121 @@
-import os
-import json
-import re
+# --- Standard Library ---
 import asyncio
+import hashlib
+import json
+import logging
+import os
+import re
 import shutil
 import sys
-from datetime import datetime, time as dt_time, timedelta
-from dataclasses import dataclass, field
-from time import time as timestamp
-from typing import Dict, List, Optional, Set, Any, Tuple, Callable
+import urllib.parse
 from collections import defaultdict, namedtuple
+from dataclasses import dataclass, field
+from datetime import datetime, time as dt_time, timedelta
 from difflib import SequenceMatcher, get_close_matches
 from enum import Enum, auto
-import urllib.parse
-import hashlib
+from pathlib import Path
+from time import time as timestamp
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
-from dotenv import load_dotenv
-from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
-from telegram.ext import Application, ApplicationBuilder, CallbackQueryHandler, ContextTypes, CommandHandler, MessageHandler, filters, BasePersistence, PicklePersistence, JobQueue
-from telegram.constants import ParseMode
-from telegram.error import Forbidden, RetryAfter, TimedOut, NetworkError
-
-from logger import log_info, log_error, log_warning
-from translations import translations
-from parse_water import parse_all_water_announcements_async
-from parse_gas import parse_all_gas_announcements_async
-from parse_electric import parse_all_electric_announcements_async
-from ai_engine import clarify_address_ai, is_ai_available, MODEL_PATH as AI_MODEL_PATH
-
+# --- Third party libraries ---
 import aiofiles
 import aiofiles.os as aios
-from pathlib import Path
+import psycopg2
+import pytz
+from dotenv import load_dotenv
+from telegram import (
+    BotCommand,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    KeyboardButton,
+    ReplyKeyboardMarkup,
+    ReplyKeyboardRemove,
+    Update,
+)
+from telegram.constants import ParseMode
+from telegram.error import Forbidden, NetworkError, RetryAfter, TimedOut
+from telegram.ext import (
+    Application,
+    ApplicationBuilder,
+    BasePersistence,
+    CallbackContext,
+    CallbackQueryHandler,
+    CommandHandler,
+    ContextTypes,
+    filters,
+    JobQueue,
+    MessageHandler,
+    PicklePersistence,
+    Updater,
+)
+from transformers import (
+    AutoModelForTokenClassification,
+    AutoTokenizer,
+    MarianMTModel,
+    MarianTokenizer,
+    pipeline,
+)
+
+# --- Local modules ---
+from ai_engine import clarify_address_ai, is_ai_available, MODEL_PATH as AI_MODEL_PATH
+from logger import log_error, log_info, log_warning
+from parse_electric import parse_all_electric_announcements_async
+from parse_gas import parse_all_gas_announcements_async
+from parse_water import parse_all_water_announcements_async
+from translations import translations
+
 
 # if os.getenv("MAINTENANCE_MODE", "false").lower() == "true":
 #     print("🚧 Приложение в режиме обслуживания. Остановка.")
 #     sys.exit(1)
 
+# tokenizer = AutoTokenizer.from_pretrained("Helsinki-NLP/opus-mt-hy-en")
+# model = AutoModelForSeq2SeqLM.from_pretrained("Helsinki-NLP/opus-mt-hy-en")
+# tokenizer = AutoTokenizer.from_pretrained("dslim/bert-base-NER")
+# model = AutoModelForTokenClassification.from_pretrained("dslim/bert-base-NER")
+
+# 1. Модели
+translate_hy_to_en = pipeline("translation", model="Helsinki-NLP/opus-mt-hy-en")
+ner_pipeline = pipeline("ner", model="dslim/bert-base-NER", aggregation_strategy="simple")
+
+# 2. Функция для перевода с ARM на ENG
+def translate_from_armenian(text_hy):
+    return translate_hy_to_en(text_hy)[0]["translation_text"]
+
+# 3. Функция для получения переводов из словаря
+def get_translation(text_en, to_lang="ru"):
+    if text_en in translations:
+        return translations[text_en].get(to_lang)
+    return None
+
+# 4. Основная обработка
+def process_arm_text(text_hy):
+    text_en = translate_from_armenian(text_hy)
+    entities = ner_pipeline(text_en)
+
+    extracted = []
+    for ent in entities:
+        word = ent["word"]
+        translated_word_ru = get_translation(word, "ru") or word
+        translated_word_hy = get_translation(word, "hy") or word
+        extracted.append({
+            "entity": ent["entity_group"],
+            "word_en": word,
+            "word_ru": translated_word_ru,
+            "word_hy": translated_word_hy
+        })
+
+    return {
+        "input_hy": text_hy,
+        "translated_en": text_en,
+        "entities": extracted
+    }
+
 
 # --- КОНСТАНТЫ ---
 class UserSteps(Enum):
     NONE = auto()
-    AWAITING_LANGUAGE_CHOICE = auto()
+    # AWAITING_LANGUAGE_CHOICE = auto()
     AWAITING_REGION = auto()
     AWAITING_STREET = auto()
     AWAITING_STREET_CONFIRMATION = auto()
@@ -70,25 +146,22 @@ CALLBACK_PREFIX_FAQ_ITEM = "faq_item:"
 CALLBACK_PREFIX_SOUND = "sound_set:"
 
 FREQUENCY_OPTIONS = {
-    "Free_6h":    {"interval": 21600, "hy": "⏱ 6 ժամ",  "ru": "⏱ 6 часов",  "en": "⏱ 6 hours",  "tier": "Free"},
-    "Free_12h":   {"interval": 43200, "hy": "⏱ 12 ժամ", "ru": "⏱ 12 часов","en": "⏱ 12 hours", "tier": "Free"},
-    "Free_24h":   {"interval": 86400, "hy": "⏱ 24 ժամ", "ru": "⏱ 24 часа", "en": "⏱ 24 hours", "tier": "Free"},
-    "Basic_1h":   {"interval": 3600,  "hy": "⏱ 1 ժամ",  "ru": "⏱ 1 час",   "en": "⏱ 1 hour",   "tier": "Basic"},
-    "Premium_30m":{"interval": 1800,  "hy": "⏱ 30 րոպե","ru": "⏱ 30 минут","en": "⏱ 30 min", "tier": "Premium"},
-    "Ultra_15m":  {"interval": 900,   "hy": "⏱ 15 րոպե","ru": "⏱ 15 минут","en": "⏱ 15 min", "tier": "Ultra"},
+    "Free_6h": {"interval": 21600, "hy": "⏱ 6 ժամ", "ru": "⏱ 6 часов", "en": "⏱ 6 hours", "tier": "Free"},
+    "Free_12h": {"interval": 43200, "hy": "⏱ 12 ժամ", "ru": "⏱ 12 часов","en": "⏱ 12 hours", "tier": "Free"},
+    "Free_24h": {"interval": 86400, "hy": "⏱ 24 ժամ", "ru": "⏱ 24 часа", "en": "⏱ 24 hours", "tier": "Free"},
+    "Basic_1h": {"interval": 3600, "hy": "⏱ 1 ժամ", "ru": "⏱ 1 час", "en": "⏱ 1 hour", "tier": "Basic"},
+    "Premium_30m": {"interval": 1800, "hy": "⏱ 30 րոպե", "ru": "⏱ 30 минут","en": "⏱ 30 min", "tier": "Premium"},
+    "Ultra_15m": {"interval": 900, "hy": "⏱ 15 րոպե", "ru": "⏱ 15 минут","en": "⏱ 15 min", "tier": "Ultra"},
 }
+
 TIER_ORDER = ["Free", "Basic", "Premium", "Ultra"]
+
 paid_levels = {"Basic", "Premium", "Ultra"}
 premium_tiers = {
     option_name: {
         "interval": option_data["interval"],
-        "label": {  # Можно сразу собрать метки на трех языках
-            "hy": option_data["hy"],
-            "ru": option_data["ru"],
-            "en": option_data["en"],
-        },
+        "label": {"hy": option_data["hy"], "ru": option_data["ru"], "en": option_data["en"]},
         "tier": option_data["tier"],
-        # Если позже понадобится цена — можно добавить сюда поле "price_cents" или "price_dram"
     }
     for option_name, option_data in FREQUENCY_OPTIONS.items()
     if option_data["tier"] in paid_levels
@@ -107,9 +180,8 @@ class BotConfig:
     log_level: str = "INFO"
     default_user_timezone: str = "Asia/Yerevan"
     support_chat_id_str: Optional[str] = None
-    max_requests_per_minute: int = 30 # Added from previous context
-    max_backups_to_keep: int = 5 # Added from previous context
-
+    max_requests_per_minute: int = 30
+    max_backups_to_keep: int = 5
     admin_user_ids: List[int] = field(init=False, default_factory=list)
     support_chat_id: Optional[int] = field(init=False, default=None)
 
@@ -150,7 +222,7 @@ class BotConfig:
         if not self.telegram_token: raise ValueError("Необходим TELEGRAM_BOT_TOKEN")
         return True
 
-config = BotConfig.from_env() # config is now global
+config = BotConfig.from_env()
 config.validate()
 
 # --- ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ И ССЫЛКИ НА BOT_DATA ---
@@ -198,7 +270,7 @@ def get_bot_data(context: ContextTypes.DEFAULT_TYPE) -> BotDataAccessor:
 
 # --- ЯЗЫКИ И КЛАВИАТУРЫ ---
 languages = {"Հայերեն": "hy", "Русский": "ru", "English": "en"}
-regions_hy = ["Երևան", "Արագածոտն", "Արարատ", "Արմավիր", "Գեղարքունիք", "Լոռի", "Կոտայք", "Շիրակ", "Սյունիք", "Վայոց ձոր", "Տավուշ"]
+regions_hy = ["Երևան", "Արագածոտն", "Արարատ", "Արմավիր", "Գեղարքունիք", "Լոռի", "Կոտայք", "Շիրակ", "Սյունիք", "Վայոց Ձոր", "Տավուշ"]
 regions_ru = ["Ереван", "Арагацотн", "Арарат", "Армавир", "Вайоц Дзор", "Гехаркуник", "Котайк", "Лори", "Сюник", "Тавуш", "Ширак"]
 regions_en = ["Yerevan", "Aragatsotn", "Ararat", "Armavir", "Gegharkunik", "Kotayk", "Lori", "Shirak", "Syunik", "Tavush", "Vayots Dzor"]
 # all_known_regions_flat is initialized in post_init_hook and put into bot_data
@@ -1850,6 +1922,7 @@ def main():
     log_info("Бот начал опрос...")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
     log_info("Бот остановлен.")
+
 
 if __name__ == "__main__":
     main()
