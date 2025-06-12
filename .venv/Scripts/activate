@@ -35,7 +35,7 @@ deactivate () {
 # unset irrelevant variables
 deactivate nondestructive
 
-VIRTUAL_ENV="C:\Users\Gevorg\Gevorg_computer\Diploma_work\My\Project_ML\AI\With_llama\.venv"
+VIRTUAL_ENV="C:\Users\Gevorg\Gevorg_computer\Diploma_work\My\Project_with_LM\With_neuromodels\Project\.venv"
 export VIRTUAL_ENV
 
 _OLD_VIRTUAL_PATH="$PATH"
