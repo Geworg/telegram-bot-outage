@@ -81,11 +81,11 @@ def get_text(key: str, lang: str, **kwargs) -> str:
 
 # --- Typing Indicator ---
 async def send_typing_periodically(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
-    """Sends 'typing' action every 4.5 seconds until cancelled."""
+    """Sends 'typing' action every 0.9 seconds until cancelled."""
     try:
         while True:
             await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
-            await asyncio.sleep(4.5)
+            await asyncio.sleep(0.9)
     except asyncio.CancelledError:
         pass # This is expected when the task is cancelled
 
