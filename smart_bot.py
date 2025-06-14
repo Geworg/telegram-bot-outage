@@ -2,6 +2,7 @@
 import asyncio
 import logging
 import os
+import re
 import sys
 from enum import Enum, auto
 from datetime import datetime, time as dt_time
@@ -16,7 +17,8 @@ from telegram import (
     ReplyKeyboardRemove,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
-    BotCommand
+    BotCommand,
+    User
 )
 from telegram.ext import (
     Application,
@@ -45,10 +47,7 @@ load_dotenv()
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO"),
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    handlers=[
-        logging.FileHandler("bot.log"),
-        logging.StreamHandler()
-    ]
+    handlers=[logging.FileHandler("bot.log"), logging.StreamHandler()]
 )
 log = logging.getLogger(__name__)
 
@@ -58,48 +57,37 @@ class UserSteps(Enum):
     AWAITING_INITIAL_LANG = auto()
     AWAITING_REGION = auto()
     AWAITING_STREET = auto()
-    AWAITING_ADDRESS_CONFIRM = auto()
-    AWAITING_ADDRESS_REMOVE = auto()
     AWAITING_FREQUENCY = auto()
+    AWAITING_SUPPORT_MESSAGE = auto()
+    AWAITING_SILENT_INTERVAL = auto()
 
 ADMIN_IDS = [int(i) for i in os.getenv("ADMIN_USER_IDS", "").split(',') if i]
+SUPPORT_CHAT_ID = os.getenv("SUPPORT_CHAT_ID")
 TIER_ORDER = ["Free", "Basic", "Premium", "Ultra"]
+REGIONS_LIST = ["Երևան", "Արագածոտն", "Արարատ", "Արմավիր", "Գեղարքունիք", "Լոռի", "Կոտայք", "Շիրակ", "Սյունիք", "Վայոց Ձոր", "Տավուշ"]
 FREQUENCY_OPTIONS = {
     "Free_6h": {"interval": 21600, "hy": "⏱ 6 ժամ", "ru": "⏱ 6 часов", "en": "⏱ 6 hours", "tier": "Free"},
-    "Free_12h": {"interval": 43200, "hy": "⏱ 12 ժամ", "ru": "⏱ 12 часов","en": "⏱ 12 hours", "tier": "Free"},
+    "Free_12h": {"interval": 43200, "hy": "⏱ 12 ժամ", "ru": "⏱ 12 часов", "en": "⏱ 12 hours", "tier": "Free"},
     "Basic_1h": {"interval": 3600, "hy": "⏱ 1 ժամ", "ru": "⏱ 1 час", "en": "⏱ 1 hour", "tier": "Basic"},
-    "Premium_30m": {"interval": 1800, "hy": "⏱ 30 րոպե", "ru": "⏱ 30 минут","en": "⏱ 30 min", "tier": "Premium"},
-    "Ultra_15m": {"interval": 900, "hy": "⏱ 15 րոպե", "ru": "⏱ 15 минут","en": "⏱ 15 min", "tier": "Ultra"},
+    "Premium_30m": {"interval": 1800, "hy": "⏱ 30 րոպե", "ru": "⏱ 30 минут", "en": "⏱ 30 min", "tier": "Premium"},
+    "Ultra_15m": {"interval": 900, "hy": "⏱ 15 րոպե", "ru": "⏱ 15 минут", "en": "⏱ 15 min", "tier": "Ultra"},
 }
 
-# --- Helper Functions ---
+# --- Helper & Utility Functions ---
 def get_user_lang(context: ContextTypes.DEFAULT_TYPE) -> str:
     return context.user_data.get("lang", "en")
 
 def get_text(key: str, lang: str, **kwargs) -> str:
     return translations.get(key, {}).get(lang, f"<{key}>").format(**kwargs)
 
-# --- Typing Indicator ---
 async def send_typing_periodically(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
-    """Sends 'typing' action every 0.9 seconds until cancelled."""
     try:
         while True:
             await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
-            await asyncio.sleep(0.9)
+            await asyncio.sleep(4.5)
     except asyncio.CancelledError:
-        pass # This is expected when the task is cancelled
+        pass
 
-# --- Keyboard Generation ---
-def get_main_menu_keyboard(lang: str) -> ReplyKeyboardMarkup:
-    buttons = [
-        [KeyboardButton(get_text("add_address_btn", lang)), KeyboardButton(get_text("remove_address_btn", lang))],
-        [KeyboardButton(get_text("show_addresses_btn", lang)), KeyboardButton(get_text("set_frequency_btn", lang))],
-        [KeyboardButton(get_text("language_btn", lang)), KeyboardButton(get_text("help_btn", lang))],
-        [KeyboardButton(get_text("stats_btn", lang))]
-    ]
-    return ReplyKeyboardMarkup(buttons, resize_keyboard=True)
-
-# --- Decorators ---
 def admin_only(func: Callable):
     async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
         if update.effective_user.id not in ADMIN_IDS:
@@ -109,19 +97,25 @@ def admin_only(func: Callable):
         return await func(update, context, *args, **kwargs)
     return wrapper
 
-# --- Command Handlers ---
+# --- Keyboard Generation ---
+def get_main_menu_keyboard(lang: str) -> ReplyKeyboardMarkup:
+    buttons = [
+        [KeyboardButton(get_text("add_address_btn", lang)), KeyboardButton(get_text("remove_address_btn", lang))],
+        [KeyboardButton(get_text("my_addresses_btn", lang)), KeyboardButton(get_text("clear_addresses_btn", lang))],
+        [KeyboardButton(get_text("frequency_btn", lang)), KeyboardButton(get_text("sound_btn", lang))],
+        [KeyboardButton(get_text("qa_btn", lang)), KeyboardButton(get_text("stats_btn", lang))],
+    ]
+    return ReplyKeyboardMarkup(buttons, resize_keyboard=True)
+
+# --- Command & Button Handlers ---
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     user_in_db = await db_manager.get_user(user.id)
 
     if not user_in_db:
-        # New user
         context.user_data["step"] = UserSteps.AWAITING_INITIAL_LANG.name
         user_lang_code = user.language_code if user.language_code in ['ru', 'hy'] else 'en'
-        
         prompt = get_text("initial_language_prompt", user_lang_code)
-        
-        # Language buttons with flags and context
         buttons = [
             [KeyboardButton("🇦🇲 Հայերեն" + (" (continue)" if user_lang_code == 'hy' else ""))],
             [KeyboardButton("🇷🇺 Русский" + (" (продолжить)" if user_lang_code == 'ru' else ""))],
@@ -130,32 +124,126 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard = ReplyKeyboardMarkup(buttons, resize_keyboard=True, one_time_keyboard=True)
         await update.message.reply_text(prompt, reply_markup=keyboard)
         await db_manager.create_or_update_user(user.id, user_lang_code)
+        context.user_data["lang"] = user_lang_code
     else:
-        # Existing user
         context.user_data["lang"] = user_in_db['language_code']
         context.user_data["step"] = UserSteps.NONE.name
-        lang = get_user_lang(context)
-        await update.message.reply_text(
-            get_text("menu_message", lang),
-            reply_markup=get_main_menu_keyboard(lang)
-        )
+        lang = user_in_db['language_code']
+        await update.message.reply_text(get_text("menu_message", lang), reply_markup=get_main_menu_keyboard(lang))
 
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def add_address_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lang = get_user_lang(context)
-    await update.message.reply_text(get_text("help_text", lang), parse_mode=ParseMode.MARKDOWN_V2, disable_web_page_preview=True)
+    context.user_data["step"] = UserSteps.AWAITING_REGION.name
+    buttons = [[KeyboardButton(r)] for r in REGIONS_LIST]
+    buttons.append([KeyboardButton(get_text("cancel", lang))])
+    keyboard = ReplyKeyboardMarkup(buttons, resize_keyboard=True, one_time_keyboard=True)
+    await update.message.reply_text(get_text("choose_region", lang), reply_markup=keyboard)
+
+async def remove_address_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    lang = get_user_lang(context)
+    addresses = await db_manager.get_user_addresses(user_id)
+    if not addresses:
+        await update.message.reply_text(get_text("no_addresses_yet", lang))
+        return
+
+    buttons = [[InlineKeyboardButton(addr['full_address_text'], callback_data=f"remove_addr_{addr['address_id']}")] for addr in addresses]
+    buttons.append([InlineKeyboardButton(get_text("cancel", lang), callback_data="cancel_action")])
+    keyboard = InlineKeyboardMarkup(buttons)
+    await update.message.reply_text(get_text("select_address_to_remove", lang), reply_markup=keyboard)
+
+async def my_addresses_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    lang = get_user_lang(context)
+    addresses = await db_manager.get_user_addresses(user_id)
+
+    if not addresses:
+        await update.message.reply_text(get_text("no_addresses_yet", lang))
+        return
+
+    response_text = get_text("your_addresses_list_title", lang) + "\n\n"
+    for addr in addresses:
+        response_text += f"📍 `{addr['full_address_text']}`\n"
     
-async def language_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(response_text, parse_mode=ParseMode.MARKDOWN_V2)
+
+async def frequency_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    lang = get_user_lang(context)
+    user = await db_manager.get_user(user_id)
+    if not user: return
+    
+    user_tier = "Ultra" if user_id in ADMIN_IDS else user['tier']
+    user_tier_index = TIER_ORDER.index(user_tier)
+    
+    buttons = []
+    for key, option in FREQUENCY_OPTIONS.items():
+        if user_tier_index >= TIER_ORDER.index(option['tier']):
+            buttons.append([KeyboardButton(option[lang])])
+            
+    current_freq_text = get_text("frequency_current", lang)
+    for option in FREQUENCY_OPTIONS.values():
+        if option['interval'] == user['frequency_seconds']:
+            current_freq_text += f" {option[lang]}"
+            break
+            
+    keyboard = ReplyKeyboardMarkup(buttons + [[KeyboardButton(get_text("cancel", lang))]], resize_keyboard=True, one_time_keyboard=True)
+    await update.message.reply_text(f"{current_freq_text}\n\n{get_text('frequency_prompt', lang)}", reply_markup=keyboard)
+    context.user_data["step"] = UserSteps.AWAITING_FREQUENCY.name
+
+async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    lang = get_user_lang(context)
+    
+    system_stats = await db_manager.get_system_stats()
+    user_notif_count = await db_manager.get_user_notification_count(user_id)
+    
+    await update.message.reply_text(get_text("stats_message", lang, **system_stats, user_notifications=user_notif_count), parse_mode=ParseMode.MARKDOWN_V2)
+
+async def clear_addresses_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    lang = get_user_lang(context)
+    buttons = [[
+        InlineKeyboardButton(get_text("yes", lang), callback_data="confirm_clear_yes"),
+        InlineKeyboardButton(get_text("no", lang), callback_data="cancel_action")
+    ]]
+    keyboard = InlineKeyboardMarkup(buttons)
+    await update.message.reply_text(get_text("clear_addresses_prompt", lang), reply_markup=keyboard)
+
+async def qa_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lang = get_user_lang(context)
     buttons = [
-        [KeyboardButton("🇦🇲 Հայերեն")],
-        [KeyboardButton("🇷🇺 Русский")],
-        [KeyboardButton("🇬🇧 English")]
+        [InlineKeyboardButton(get_text("qa_placeholder_q1", lang), callback_data="qa_1")],
+        [InlineKeyboardButton(get_text("qa_placeholder_q2", lang), callback_data="qa_2")],
+        [InlineKeyboardButton(get_text("support_btn", lang), callback_data="qa_support")],
+        [InlineKeyboardButton(get_text("back_btn", lang), callback_data="qa_back")]
     ]
-    keyboard = ReplyKeyboardMarkup(buttons, resize_keyboard=True, one_time_keyboard=True)
-    await update.message.reply_text(get_text("change_language_prompt", lang), reply_markup=keyboard)
-    context.user_data["step"] = UserSteps.AWAITING_INITIAL_LANG.name
+    keyboard = InlineKeyboardMarkup(buttons)
+    await update.message.reply_text(get_text("qa_title", lang), reply_markup=keyboard)
 
-# --- Admin Handlers ---
+async def sound_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    lang = get_user_lang(context)
+    user = await db_manager.get_user(user_id)
+    if not user: return
+    
+    sound_status = get_text("sound_on_status", lang) if user['notification_sound_enabled'] else get_text("sound_off_status", lang)
+    silent_status = get_text("silent_mode_on_status", lang, start=user['silent_mode_start_time'].strftime('%H:%M'), end=user['silent_mode_end_time'].strftime('%H:%M')) if user['silent_mode_enabled'] else get_text("silent_mode_off_status", lang)
+    
+    text = f"{get_text('sound_settings_title', lang)}\n\n{sound_status}\n{silent_status}"
+    
+    buttons = [
+        [InlineKeyboardButton(get_text("sound_toggle_off" if user['notification_sound_enabled'] else "sound_toggle_on", lang), callback_data="sound_toggle_main")],
+        [InlineKeyboardButton(get_text("silent_mode_toggle_off" if user['silent_mode_enabled'] else "silent_mode_toggle_on", lang), callback_data="sound_toggle_silent")],
+        [InlineKeyboardButton(get_text("back_btn", lang), callback_data="sound_back")]
+    ]
+    keyboard = InlineKeyboardMarkup(buttons)
+    
+    # Check if called from a button click to edit message, otherwise send new
+    if update.callback_query:
+        await update.callback_query.edit_message_text(text, reply_markup=keyboard)
+    else:
+        await update.message.reply_text(text, reply_markup=keyboard)
+
 @admin_only
 async def maintenance_on_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await db_manager.set_bot_status("maintenance_mode", "true")
@@ -170,108 +258,80 @@ async def maintenance_off_command(update: Update, context: ContextTypes.DEFAULT_
     await update.message.reply_text(get_text("maintenance_off_feedback", lang))
     log.info(f"Admin {update.effective_user.id} disabled maintenance mode.")
 
-@admin_only
-async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    message_text = " ".join(context.args)
-    if not message_text:
-        await update.message.reply_text("Usage: /broadcast <message>")
-        return
-
-    lang = get_user_lang(context)
-    await update.message.reply_text(get_text("broadcast_started", lang))
-    
-    # This is a simplified broadcast. For very large user bases, this would need to be a background job.
-    all_users = [] # You'd get this from db_manager.get_all_users()
-    sent_count = 0
-    for user in all_users:
-        try:
-            await context.bot.send_message(chat_id=user['user_id'], text=message_text)
-            sent_count += 1
-            await asyncio.sleep(0.1) # Avoid rate limits
-        except Forbidden:
-            log.warning(f"Broadcast failed for user {user['user_id']}: Bot was blocked.")
-        except Exception as e:
-            log.error(f"Broadcast failed for user {user['user_id']}: {e}")
-
-    await update.message.reply_text(get_text("broadcast_finished", lang, count=sent_count))
-
-# --- Message Handler / Router ---
+# --- Main Message Router ---
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Check maintenance mode
     is_maintenance = await db_manager.get_bot_status("maintenance_mode")
     if is_maintenance == "true" and update.effective_user.id not in ADMIN_IDS:
         lang = get_user_lang(context)
         await update.message.reply_text(get_text("maintenance_user_notification", lang))
         return
 
-    # Route based on user step
-    step = context.user_data.get("step", UserSteps.NONE.name)
-    
-    if step == UserSteps.AWAITING_INITIAL_LANG.name:
-        await handle_language_selection(update, context)
-    elif step == UserSteps.AWAITING_REGION.name:
-        await handle_region_selection(update, context)
-    elif step == UserSteps.AWAITING_STREET.name:
-        await handle_street_input(update, context)
-    # Add other steps here
-    else: # Default to main menu actions
-        await handle_main_menu_text(update, context)
+    step = context.user_data.get("step")
+    lang = get_user_lang(context)
 
-# --- State-based Logic Handlers ---
-async def handle_language_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text
-    lang_code = 'en'
-    if 'Հայերեն' in text:
-        lang_code = 'hy'
-    elif 'Русский' in text:
-        lang_code = 'ru'
-    
-    context.user_data["lang"] = lang_code
-    await db_manager.update_user_language(update.effective_user.id, lang_code)
-    
-    lang = get_user_lang(context) # Get the newly set language
-    await update.message.reply_text(
-        get_text("language_set_success", lang),
-        reply_markup=get_main_menu_keyboard(lang)
-    )
-    context.user_data["step"] = UserSteps.NONE.name
+    if update.message and update.message.text == get_text("cancel", lang):
+        context.user_data["step"] = UserSteps.NONE.name
+        await update.message.reply_text(get_text("action_cancelled", lang), reply_markup=get_main_menu_keyboard(lang))
+        return
+        
+    step_handlers = {
+        UserSteps.AWAITING_INITIAL_LANG.name: handle_language_selection,
+        UserSteps.AWAITING_REGION.name: handle_region_selection,
+        UserSteps.AWAITING_STREET.name: handle_street_input,
+        UserSteps.AWAITING_FREQUENCY.name: handle_frequency_selection,
+        UserSteps.AWAITING_SUPPORT_MESSAGE.name: handle_support_message,
+        UserSteps.AWAITING_SILENT_INTERVAL.name: handle_silent_interval_input,
+        UserSteps.NONE.name: handle_main_menu_text,
+    }
+
+    handler = step_handlers.get(step, handle_main_menu_text)
+    await handler(update, context)
 
 async def handle_main_menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     lang = get_user_lang(context)
     
-    if text == get_text("add_address_btn", lang):
-        # Present region keyboard
-        context.user_data["step"] = UserSteps.AWAITING_REGION.name
-        # You need a list of regions for the keyboard
-        # For now, a placeholder
-        regions = ["Երևան", "Շիրակ", "Լոռի"] # This should be comprehensive
-        buttons = [[KeyboardButton(r)] for r in regions]
-        keyboard = ReplyKeyboardMarkup(buttons, resize_keyboard=True, one_time_keyboard=True)
-        await update.message.reply_text(get_text("choose_region", lang), reply_markup=keyboard)
-
-    elif text == get_text("help_btn", lang):
-        await help_command(update, context)
+    menu_map = {
+        get_text("add_address_btn", lang): add_address_command,
+        get_text("remove_address_btn", lang): remove_address_command,
+        get_text("my_addresses_btn", lang): my_addresses_command,
+        get_text("frequency_btn", lang): frequency_command,
+        get_text("sound_btn", lang): sound_command,
+        get_text("qa_btn", lang): qa_command,
+        get_text("stats_btn", lang): stats_command,
+        get_text("clear_addresses_btn", lang): clear_addresses_command,
+    }
     
-    elif text == get_text("language_btn", lang):
-        await language_command(update, context)
-        
+    command_to_run = menu_map.get(text)
+    if command_to_run:
+        await command_to_run(update, context)
     else:
-        await update.message.reply_text(
-            get_text("unknown_command", lang),
-            reply_markup=get_main_menu_keyboard(lang)
-        )
+        await update.message.reply_text(get_text("unknown_command", lang), reply_markup=get_main_menu_keyboard(lang))
 
+# --- State Logic Handlers ---
+async def handle_language_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text
+    lang_code = 'en'
+    if 'Հայերեն' in text: lang_code = 'hy'
+    elif 'Русский' in text: lang_code = 'ru'
+    
+    context.user_data["lang"] = lang_code
+    await db_manager.update_user_language(update.effective_user.id, lang_code)
+    
+    await update.message.reply_text(get_text("language_set_success", lang_code), reply_markup=get_main_menu_keyboard(lang_code))
+    context.user_data["step"] = UserSteps.NONE.name
+    
 async def handle_region_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
     region = update.message.text
-    # You should validate this against your known list of regions
+    if region not in REGIONS_LIST:
+        lang = get_user_lang(context)
+        await update.message.reply_text(get_text("unknown_command", lang))
+        return
+        
     context.user_data["selected_region"] = region
     lang = get_user_lang(context)
     
-    await update.message.reply_text(
-        get_text("enter_street", lang, region=region),
-        reply_markup=ReplyKeyboardRemove()
-    )
+    await update.message.reply_text(get_text("enter_street", lang, region=region), reply_markup=ReplyKeyboardRemove())
     context.user_data["step"] = UserSteps.AWAITING_STREET.name
     
 async def handle_street_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -290,136 +350,260 @@ async def handle_street_input(update: Update, context: ContextTypes.DEFAULT_TYPE
 
         if verified_address and verified_address.get('full_address'):
             context.user_data["verified_address_cache"] = verified_address
-            # Ask for confirmation
             buttons = [[
                 InlineKeyboardButton(get_text("yes", lang), callback_data="confirm_address_yes"),
-                InlineKeyboardButton(get_text("no", lang), callback_data="confirm_address_no")
+                InlineKeyboardButton(get_text("no", lang), callback_data="cancel_action")
             ]]
             keyboard = InlineKeyboardMarkup(buttons)
+            escaped_address = verified_address['full_address'].replace('-', '\\-').replace('.', '\\.')
             await update.message.reply_text(
-                get_text("address_confirm_prompt", lang, address=verified_address['full_address']),
-                reply_markup=keyboard,
-                parse_mode=ParseMode.MARKDOWN_V2
+                get_text("address_confirm_prompt", lang, address=escaped_address),
+                reply_markup=keyboard, parse_mode=ParseMode.MARKDOWN_V2
             )
-            context.user_data["step"] = UserSteps.AWAITING_ADDRESS_CONFIRM.name
         else:
             await update.message.reply_text(get_text("address_not_found_yandex", lang))
-            # Go back to main menu or re-prompt for street
-            context.user_data["step"] = UserSteps.NONE.name
-            await update.message.reply_text(get_text("menu_message", lang), reply_markup=get_main_menu_keyboard(lang))
-
+            context.user_data["step"] = UserSteps.AWAITING_STREET.name
     finally:
         typing_task.cancel()
+
+async def handle_frequency_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text
+    lang = get_user_lang(context)
+    user_id = update.effective_user.id
+    
+    selected_interval = None
+    for option in FREQUENCY_OPTIONS.values():
+        if option[lang] == text:
+            selected_interval = option['interval']
+            break
+            
+    if selected_interval:
+        await db_manager.update_user_frequency(user_id, selected_interval)
+        await update.message.reply_text(get_text("frequency_set_success", lang), reply_markup=get_main_menu_keyboard(lang))
+        context.user_data["step"] = UserSteps.NONE.name
+    else:
+        await update.message.reply_text(get_text("unknown_command", lang))
+
+async def handle_support_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    lang = get_user_lang(context)
+    
+    if not SUPPORT_CHAT_ID:
+        log.error("SUPPORT_CHAT_ID is not set, cannot forward message.")
+        await update.message.reply_text(get_text("error_generic", lang), reply_markup=get_main_menu_keyboard(lang))
+        context.user_data["step"] = UserSteps.NONE.name
+        return
+        
+    support_message = get_text("support_message_from_user", "en", user_mention=user.mention_markdown_v2(), user_id=user.id, message=update.message.text)
+    await context.bot.send_message(chat_id=SUPPORT_CHAT_ID, text=support_message, parse_mode=ParseMode.MARKDOWN_V2)
+    await update.message.reply_text(get_text("support_message_sent", lang), reply_markup=get_main_menu_keyboard(lang))
+    context.user_data["step"] = UserSteps.NONE.name
+
+async def handle_silent_interval_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text
+    lang = get_user_lang(context)
+    match = re.match(r'^\s*(\d{1,2}:\d{2})\s*-\s*(\d{1,2}:\d{2})\s*$', text)
+    
+    if not match:
+        await update.message.reply_text(get_text("invalid_time_interval", lang))
+        return
+        
+    start_time, end_time = match.groups()
+    settings = {"silent_mode_start_time": start_time, "silent_mode_end_time": end_time, "silent_mode_enabled": True}
+    await db_manager.update_user_sound_settings(update.effective_user.id, settings)
+    
+    await update.message.reply_text(get_text("silent_interval_set", lang), reply_markup=ReplyKeyboardRemove())
+    context.user_data["step"] = UserSteps.NONE.name
+    await sound_command(update, context)
 
 # --- Callback Query Handlers ---
 async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+    
+    data = query.data
+    
+    if data.startswith("remove_addr_"): await remove_address_callback(update, context)
+    elif data == "confirm_address_yes": await confirm_address_callback(update, context)
+    elif data == "confirm_clear_yes": await clear_addresses_callback(update, context)
+    elif data.startswith("qa_"): await qa_callback_handler(update, context)
+    elif data.startswith("sound_"): await sound_callback_handler(update, context)
+    elif data == "cancel_action": await cancel_callback(update, context)
+    
+async def remove_address_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
     lang = get_user_lang(context)
+    address_id_to_remove = int(query.data.split('_')[2])
+    await db_manager.remove_user_address(address_id_to_remove, query.from_user.id)
+    await query.edit_message_text(get_text("address_removed_success", lang))
+    await context.bot.send_message(chat_id=query.message.chat_id, text=get_text("menu_message", lang), reply_markup=get_main_menu_keyboard(lang))
 
-    if query.data == "confirm_address_yes":
-        address_data = context.user_data.get("verified_address_cache")
-        if not address_data:
-            await query.edit_message_text("Error: Cached address data not found.")
-            return
+async def confirm_address_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    user_id = query.from_user.id
+    lang = get_user_lang(context)
+    address_data = context.user_data.pop("verified_address_cache", None)
 
-        success = await db_manager.add_user_address(
-            user_id=update.effective_user.id,
-            region=address_data.get('province') or address_data.get('area'),
-            street=f"{address_data.get('street', '')}, {address_data.get('house', '')}".strip(', '),
-            full_address=address_data.get('full_address'),
-            lat=address_data.get('latitude'),
-            lon=address_data.get('longitude')
-        )
-        
-        if success:
-            await query.edit_message_text(get_text("address_added_success", lang))
+    if not address_data:
+        await query.edit_message_text("Error: Cached address data expired.")
+        return
+
+    success = await db_manager.add_user_address(
+        user_id=user_id, region=address_data.get('region', 'N/A'),
+        street=address_data.get('street', 'N/A'), full_address=address_data.get('full_address'),
+        lat=address_data.get('latitude'), lon=address_data.get('longitude')
+    )
+    
+    if success:
+        await query.edit_message_text(get_text("address_added_success", lang))
+        await check_outages_for_new_address(update, context, address_data)
+    else:
+        await query.edit_message_text(get_text("address_already_exists", lang))
+
+    context.user_data["step"] = UserSteps.NONE.name
+    await context.bot.send_message(
+        chat_id=query.message.chat_id, text=get_text("menu_message", lang),
+        reply_markup=get_main_menu_keyboard(lang)
+    )
+
+async def check_outages_for_new_address(update: Update, context: ContextTypes.DEFAULT_TYPE, address_data: dict):
+    lang = get_user_lang(context)
+    chat_id = update.effective_chat.id
+    await context.bot.send_message(chat_id, get_text("outage_check_on_add_title", lang), parse_mode=ParseMode.MARKDOWN_V2)
+    
+    await asyncio.gather(
+        parse_all_water_announcements_async(), parse_all_gas_announcements_async(), parse_all_electric_announcements_async()
+    )
+    all_recent_outages = await db_manager.find_outages_for_address_text(address_data['full_address'])
+    
+    if not all_recent_outages:
+        await context.bot.send_message(chat_id, get_text("outage_check_on_add_none_found", lang))
+    else:
+        # Simplified response
+        response_text = get_text("outage_check_on_add_found", lang)
+        for outage in all_recent_outages:
+             response_text += f"\n- {outage['source_type']}: {outage.get('start_datetime', 'N/A')}"
+        await context.bot.send_message(chat_id, response_text)
+
+    last_outage = await db_manager.get_last_outage_for_address(address_data['full_address'])
+    if last_outage:
+        await context.bot.send_message(chat_id, f"{get_text('last_outage_recorded', lang)} {last_outage['end_datetime'].strftime('%Y-%m-%d')}")
+    else:
+        await context.bot.send_message(chat_id, get_text("no_past_outages", lang))
+
+async def clear_addresses_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await db_manager.clear_all_user_addresses(update.callback_query.from_user.id)
+    lang = get_user_lang(context)
+    await update.callback_query.edit_message_text(get_text("all_addresses_cleared", lang))
+    await context.bot.send_message(chat_id=update.effective_chat.id, text=get_text("menu_message", lang), reply_markup=get_main_menu_keyboard(lang))
+
+async def qa_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    lang = get_user_lang(context)
+    action = query.data.split('_')[-1]
+    
+    if action == "support":
+        context.user_data["step"] = UserSteps.AWAITING_SUPPORT_MESSAGE.name
+        await query.edit_message_text(get_text("support_prompt", lang))
+    elif action == "back":
+        await query.delete()
+    else:
+        answer_key = f"qa_placeholder_a{action}"
+        await query.answer(text=get_text(answer_key, lang), show_alert=True)
+
+async def sound_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    user_id = query.from_user.id
+    action = query.data
+    
+    if action == "sound_toggle_main":
+        user = await db_manager.get_user(user_id)
+        await db_manager.update_user_sound_settings(user_id, {"notification_sound_enabled": not user['notification_sound_enabled']})
+    elif action == "sound_toggle_silent":
+        user = await db_manager.get_user(user_id)
+        if user['silent_mode_enabled']:
+            await db_manager.update_user_sound_settings(user_id, {"silent_mode_enabled": False})
         else:
-            await query.edit_message_text(get_text("address_already_exists", lang))
+            lang = get_user_lang(context)
+            context.user_data["step"] = UserSteps.AWAITING_SILENT_INTERVAL.name
+            await query.message.reply_text(get_text("enter_silent_interval_prompt", lang))
+            return
+            
+    elif action == "sound_back":
+        await query.delete()
+        return
 
-        context.user_data["step"] = UserSteps.NONE.name
-        await context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text=get_text("menu_message", lang),
-            reply_markup=get_main_menu_keyboard(lang)
-        )
+    try:
+        await query.delete()
+    except BadRequest: pass
+    await sound_command(update.callback_query, context)
 
-    elif query.data == "confirm_address_no":
-        await query.edit_message_text(get_text("action_cancelled", lang))
-        context.user_data["step"] = UserSteps.NONE.name
-        await context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text=get_text("menu_message", lang),
-            reply_markup=get_main_menu_keyboard(lang)
-        )
-
+async def cancel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    lang = get_user_lang(context)
+    try:
+        await update.callback_query.edit_message_text(text=get_text("action_cancelled", lang))
+    except BadRequest:
+        pass
+    await context.bot.send_message(chat_id=update.effective_chat.id, text=get_text("menu_message", lang), reply_markup=get_main_menu_keyboard(lang))
 
 # --- Periodic Jobs ---
 async def periodic_site_check_job(context: ContextTypes.DEFAULT_TYPE):
-    # This job should now run the new parsing functions
     log.info("Starting periodic site check job...")
     await asyncio.gather(
         parse_all_water_announcements_async(),
         parse_all_gas_announcements_async(),
         parse_all_electric_announcements_async()
     )
-    # The notification logic will be a separate job
     log.info("Periodic site check job finished.")
-
 
 # --- Application Setup ---
 async def post_init(application: Application):
-    """Runs after the bot is initialized."""
     await db_manager.init_db_pool()
     ai_engine.load_models()
     
-    # Set bot commands for different languages
-    await application.bot.set_my_commands([
-        BotCommand("start", "Start the bot"),
-        BotCommand("help", "Get help information"),
-        BotCommand("language", "Change language")
-    ])
-    log.info("Bot is initialized, DB pool and AI models are ready.")
+    commands = {
+        "en": [BotCommand("start", "Start/Menu"), BotCommand("myaddresses", "My addresses"), BotCommand("clearaddresses", "Clear all addresses"), BotCommand("sound", "Sound settings"), BotCommand("frequency", "Check frequency"), BotCommand("qa", "Q&A and Support"), BotCommand("stats", "Statistics")],
+        "ru": [BotCommand("start", "Старт/Меню"), BotCommand("myaddresses", "Мои адреса"), BotCommand("clearaddresses", "Очистить все адреса"), BotCommand("sound", "Настройки звука"), BotCommand("frequency", "Частота проверок"), BotCommand("qa", "Вопрос-ответ"), BotCommand("stats", "Статистика")],
+        "hy": [BotCommand("start", "Սկիզբ/Մենյու"), BotCommand("myaddresses", "Իմ հասցեները"), BotCommand("clearaddresses", "Մաքրել բոլոր հասցեները"), BotCommand("sound", "Ձայնի կարգավորումներ"), BotCommand("frequency", "Ստուգման հաճախականություն"), BotCommand("qa", "Հարց ու պատասխան"), BotCommand("stats", "Վիճակագրություն")]
+    }
+    for lang_code, cmd_list in commands.items():
+        await application.bot.set_my_commands(cmd_list, language_code=lang_code)
+    log.info("Bot commands set. Bot is initialized.")
 
 async def post_shutdown(application: Application):
-    """Runs before the bot shuts down."""
     await db_manager.close_db_pool()
-    log.info("Bot is shutting down, DB pool closed.")
+    log.info("Bot shut down gracefully.")
 
 def main():
-    """Start the bot."""
     if not os.getenv("TELEGRAM_BOT_TOKEN"):
-        log.critical("TELEGRAM_BOT_TOKEN environment variable not set. Exiting.")
+        log.critical("TELEGRAM_BOT_TOKEN not set. Exiting.")
         sys.exit(1)
 
     application = (
-        ApplicationBuilder()
-        .token(os.getenv("TELEGRAM_BOT_TOKEN"))
-        .post_init(post_init)
-        .post_shutdown(post_shutdown)
-        .build()
+        ApplicationBuilder().token(os.getenv("TELEGRAM_BOT_TOKEN"))
+        .post_init(post_init).post_shutdown(post_shutdown).build()
     )
-
-    # Add handlers
-    application.add_handler(CommandHandler("start", start_command))
-    application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CommandHandler("language", language_command))
-    application.add_handler(CommandHandler("maintenance_on", maintenance_on_command))
-    application.add_handler(CommandHandler("maintenance_off", maintenance_off_command))
-    application.add_handler(CommandHandler("broadcast", broadcast_command))
+    
+    command_handlers = {
+        "start": start_command, "myaddresses": my_addresses_command,
+        "frequency": frequency_command, "stats": stats_command,
+        "clearaddresses": clear_addresses_command, "qa": qa_command,
+        "sound": sound_command, "maintenance_on": maintenance_on_command,
+        "maintenance_off": maintenance_off_command
+    }
+    for command, handler in command_handlers.items():
+        application.add_handler(CommandHandler(command, handler))
+    
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
     application.add_handler(CallbackQueryHandler(callback_query_handler))
 
-    # Schedule jobs
     job_queue = application.job_queue
-    job_interval = int(os.getenv("JOB_INTERVAL_SECONDS", "1800")) # Default 30 mins
+    job_interval = int(os.getenv("JOB_INTERVAL_SECONDS", "1800"))
     job_queue.run_repeating(periodic_site_check_job, interval=job_interval, first=10, name="site_check")
     log.info(f"Scheduled 'site_check' job to run every {job_interval} seconds.")
 
-    # Start the Bot
     log.info("Starting bot polling...")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
-
 
 if __name__ == "__main__":
     main()

@@ -11,10 +11,7 @@ log = logging.getLogger(__name__)
 pool = None
 
 async def init_db_pool():
-    """
-    Initializes the database connection pool.
-    This should be called once when the bot starts.
-    """
+    """Initializes the database connection pool."""
     global pool
     if pool:
         return
@@ -31,26 +28,25 @@ async def init_db_pool():
     except Exception as e:
         log.critical(f"Failed to create database connection pool: {e}", exc_info=True)
         pool = None
+        # Exit if DB connection fails, as the bot cannot function.
+        # In a real production environment, you might want a retry mechanism.
+        exit(1)
 
 async def close_db_pool():
-    """
-    Closes the database connection pool.
-    This should be called once when the bot stops.
-    """
+    """Closes the database connection pool."""
     global pool
     if pool:
         await pool.close()
         log.info("Database connection pool closed.")
 
 async def setup_schema():
-    """
-    Creates the necessary tables in the database if they don't already exist.
-    """
+    """Creates or alters tables in the database to match the required schema."""
     if not pool:
         log.error("Cannot setup schema, pool is not initialized.")
         return
 
     async with pool.acquire() as conn:
+        # User table with sound settings
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS users (
                 user_id BIGINT PRIMARY KEY,
@@ -66,6 +62,12 @@ async def setup_schema():
                 last_ad_sent_at TIMESTAMPTZ
             );
         ''')
+        # Add columns if they don't exist for backward compatibility
+        await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS notification_sound_enabled BOOLEAN DEFAULT TRUE;")
+        await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS silent_mode_enabled BOOLEAN DEFAULT FALSE;")
+        await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS silent_mode_start_time TIME DEFAULT '23:00:00';")
+        await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS silent_mode_end_time TIME DEFAULT '07:00:00';")
+        await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_ad_sent_at TIMESTAMPTZ;")
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS user_addresses (
                 address_id SERIAL PRIMARY KEY,
@@ -76,9 +78,10 @@ async def setup_schema():
                 latitude DECIMAL(9, 6),
                 longitude DECIMAL(9, 6),
                 created_at TIMESTAMPTZ DEFAULT NOW(),
-                UNIQUE(user_id, region, street)
+                UNIQUE(user_id, full_address_text) -- Ensure unique full addresses per user
             );
         ''')
+
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS outages (
                 outage_id SERIAL PRIMARY KEY,
@@ -95,6 +98,7 @@ async def setup_schema():
                 created_at TIMESTAMPTZ DEFAULT NOW()
             );
         ''')
+        
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS sent_notifications (
                 user_id BIGINT NOT NULL,
@@ -103,6 +107,7 @@ async def setup_schema():
                 PRIMARY KEY (user_id, outage_hash)
             );
         ''')
+
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS bot_status (
                 status_key VARCHAR(255) PRIMARY KEY,
@@ -110,58 +115,59 @@ async def setup_schema():
                 updated_at TIMESTAMPTZ DEFAULT NOW()
             );
         ''')
-        await conn.execute('''
-            CREATE TABLE IF NOT EXISTS analytics_events (
-                event_id SERIAL PRIMARY KEY,
-                user_id BIGINT,
-                event_type VARCHAR(100) NOT NULL,
-                event_details JSONB,
-                timestamp TIMESTAMPTZ DEFAULT NOW()
-            );
-        ''')
-        log.info("Database schema verified/created.")
+
+        log.info("Database schema verified/updated.")
 
 # --- User Management ---
-
 async def get_user(user_id: int) -> Optional[asyncpg.Record]:
-    """Fetches a user's data from the database."""
     if not pool: return None
     async with pool.acquire() as conn:
         return await conn.fetchrow("SELECT * FROM users WHERE user_id = $1", user_id)
 
 async def create_or_update_user(user_id: int, language_code: str):
-    """Creates a new user or updates their last_active_at timestamp."""
     if not pool: return
     async with pool.acquire() as conn:
         await conn.execute('''
             INSERT INTO users (user_id, language_code, last_active_at)
             VALUES ($1, $2, NOW())
-            ON CONFLICT (user_id) DO UPDATE SET
-                last_active_at = NOW();
+            ON CONFLICT (user_id) DO UPDATE SET last_active_at = NOW();
         ''', user_id, language_code)
-    log.info(f"User {user_id} created or updated.")
+    log.info(f"User {user_id} created or last_active_at updated.")
 
 async def update_user_language(user_id: int, language_code: str):
-    """Updates a user's language preference."""
     if not pool: return
     async with pool.acquire() as conn:
-        await conn.execute(
-            "UPDATE users SET language_code = $1, last_active_at = NOW() WHERE user_id = $2",
-            language_code, user_id
-        )
+        await conn.execute("UPDATE users SET language_code = $1 WHERE user_id = $2", language_code, user_id)
 
 async def update_user_frequency(user_id: int, frequency_seconds: int):
-    """Updates a user's notification frequency."""
     if not pool: return
     async with pool.acquire() as conn:
-        await conn.execute(
-            "UPDATE users SET frequency_seconds = $1, last_active_at = NOW() WHERE user_id = $2",
-            frequency_seconds, user_id
-        )
-# --- Address Management ---
+        await conn.execute("UPDATE users SET frequency_seconds = $1 WHERE user_id = $2", frequency_seconds, user_id)
 
-async def add_user_address(user_id: int, region: str, street: str, full_address: str = None, lat: float = None, lon: float = None) -> bool:
-    """Adds a new address for a user, returns True if successful, False if duplicate."""
+async def update_user_sound_settings(user_id: int, settings: Dict[str, Any]):
+    """Updates various sound-related settings for a user."""
+    if not pool: return
+    
+    # Build the SET part of the query dynamically
+    set_clauses = []
+    values = []
+    i = 1
+    for key, value in settings.items():
+        set_clauses.append(f"{key} = ${i}")
+        values.append(value)
+        i += 1
+    
+    if not set_clauses:
+        return
+
+    values.append(user_id)
+    query = f"UPDATE users SET {', '.join(set_clauses)} WHERE user_id = ${i}"
+    
+    async with pool.acquire() as conn:
+        await conn.execute(query, *values)
+
+# --- Address Management ---
+async def add_user_address(user_id: int, region: str, street: str, full_address: str, lat: float, lon: float) -> bool:
     if not pool: return False
     try:
         async with pool.acquire() as conn:
@@ -171,110 +177,97 @@ async def add_user_address(user_id: int, region: str, street: str, full_address:
             ''', user_id, region, street, full_address, lat, lon)
         return True
     except asyncpg.UniqueViolationError:
-        log.warning(f"Attempted to add duplicate address for user {user_id}: {region}, {street}")
+        log.warning(f"Attempted to add duplicate address for user {user_id}: {full_address}")
         return False
 
 async def get_user_addresses(user_id: int) -> List[asyncpg.Record]:
-    """Retrieves all addresses for a given user."""
     if not pool: return []
     async with pool.acquire() as conn:
         return await conn.fetch("SELECT * FROM user_addresses WHERE user_id = $1 ORDER BY created_at", user_id)
 
 async def remove_user_address(address_id: int, user_id: int) -> bool:
-    """Removes a specific address by its ID, ensuring it belongs to the user."""
     if not pool: return False
     async with pool.acquire() as conn:
-        result = await conn.execute(
-            "DELETE FROM user_addresses WHERE address_id = $1 AND user_id = $2",
-            address_id, user_id
-        )
-        # result is a string like 'DELETE 1'
+        result = await conn.execute("DELETE FROM user_addresses WHERE address_id = $1 AND user_id = $2", address_id, user_id)
         return 'DELETE 1' in result
 
-async def clear_user_addresses(user_id: int):
-    """Removes all addresses for a user."""
-    if not pool: return
+async def clear_all_user_addresses(user_id: int) -> int:
+    """Removes all addresses for a user and returns the count of deleted rows."""
+    if not pool: return 0
     async with pool.acquire() as conn:
-        await conn.execute("DELETE FROM user_addresses WHERE user_id = $1", user_id)
+        result = await conn.execute("DELETE FROM user_addresses WHERE user_id = $1", user_id)
+        # 'DELETE 5' -> 5
+        return int(result.split(' ')[1]) if 'DELETE' in result else 0
 
 # --- Outage & Notification Management ---
-
 async def add_outage(outage_data: Dict[str, Any]):
-    """Adds a new outage announcement to the database."""
     if not pool: return
     try:
         async with pool.acquire() as conn:
+            # Using ON CONFLICT...DO NOTHING is cleaner than checking for existence first.
             await conn.execute('''
                 INSERT INTO outages (raw_text_hash, source_type, source_url, publication_date, start_datetime, end_datetime, status, regions, streets, details)
                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                ON CONFLICT (raw_text_hash) DO NOTHING
             ''',
-            outage_data['raw_text_hash'],
-            outage_data.get('source_type'),
-            outage_data.get('source_url'),
-            outage_data.get('publication_date'),
-            outage_data.get('start_datetime'),
-            outage_data.get('end_datetime'),
-            outage_data.get('status'),
-            outage_data.get('regions'),
-            outage_data.get('streets'),
-            outage_data.get('details')
+            outage_data['raw_text_hash'], outage_data.get('source_type'),
+            outage_data.get('source_url'), outage_data.get('publication_date'),
+            outage_data.get('start_datetime'), outage_data.get('end_datetime'),
+            outage_data.get('status'), outage_data.get('regions'),
+            outage_data.get('streets'), outage_data.get('details')
             )
-    except asyncpg.UniqueViolationError:
-        # This is expected if we re-parse the same announcement, so we can ignore it.
-        pass
     except Exception as e:
         log.error(f"Error adding outage to DB: {e}", exc_info=True)
 
+async def find_outages_for_address(lat: float, lon: float, radius_meters: int = 500) -> List[asyncpg.Record]:
+    """Finds current and future outages near a specific coordinate point."""
+    if not pool: return []
 
-async def check_if_notification_sent(user_id: int, outage_hash: str) -> bool:
-    """Checks if a notification for a specific outage has already been sent to a user."""
-    if not pool: return True # Assume sent to prevent spam if DB is down
+    # This query would need PostGIS for accurate radius search.
+    # A simplified search based on text matching is more feasible without PostGIS.
+    # This function is a placeholder for the logic you'd implement.
+    # For now, we will do the matching in Python. Let's get all recent outages.
     async with pool.acquire() as conn:
-        result = await conn.fetchval(
-            "SELECT 1 FROM sent_notifications WHERE user_id = $1 AND outage_hash = $2",
-            user_id, outage_hash
+        # Get outages that ended recently or are in the future
+        return await conn.fetch("SELECT * FROM outages WHERE end_datetime IS NULL OR end_datetime > NOW() - INTERVAL '1 day' ORDER BY start_datetime DESC")
+
+async def get_last_outage_for_address(full_address_text: str) -> Optional[asyncpg.Record]:
+    """Finds the most recent past outage for a specific address text for historical lookups."""
+    # This is a complex query that requires text matching.
+    # A full-text search index on the details column would be ideal here.
+    if not pool: return None
+    async with pool.acquire() as conn:
+        # This is a simplified LIKE query.
+        return await conn.fetchrow(
+            "SELECT * FROM outages WHERE details->>'armenian_text' ILIKE $1 AND end_datetime < NOW() ORDER BY end_datetime DESC LIMIT 1",
+            f'%{full_address_text}%'
         )
-        return result is not None
-
-async def add_sent_notification(user_id: int, outage_hash: str):
-    """Records that a notification has been sent."""
-    if not pool: return
-    async with pool.acquire() as conn:
-        await conn.execute('''
-            INSERT INTO sent_notifications (user_id, outage_hash)
-            VALUES ($1, $2)
-            ON CONFLICT (user_id, outage_hash) DO NOTHING;
-        ''', user_id, outage_hash)
 
 # --- Bot Status & Analytics ---
-
 async def set_bot_status(key: str, value: str):
-    """Sets a key-value status for the bot (e.g., maintenance mode)."""
     if not pool: return
     async with pool.acquire() as conn:
         await conn.execute('''
-            INSERT INTO bot_status (status_key, status_value, updated_at)
-            VALUES ($1, $2, NOW())
-            ON CONFLICT (status_key) DO UPDATE SET
-                status_value = $2,
-                updated_at = NOW();
+            INSERT INTO bot_status (status_key, status_value, updated_at) VALUES ($1, $2, NOW())
+            ON CONFLICT (status_key) DO UPDATE SET status_value = $2, updated_at = NOW();
         ''', key, value)
 
 async def get_bot_status(key: str) -> Optional[str]:
-    """Gets a status value for the bot."""
     if not pool: return None
     async with pool.acquire() as conn:
         return await conn.fetchval("SELECT status_value FROM bot_status WHERE status_key = $1", key)
 
-async def log_analytics_event(user_id: int, event_type: str, details: Dict = None):
-    """Logs a user interaction or system event for analytics."""
-    if not pool: return
-    import json
-    details_json = json.dumps(details) if details else None
+async def get_system_stats() -> Dict[str, int]:
+    if not pool: return {'total_users': 0, 'total_addresses': 0}
     async with pool.acquire() as conn:
-        await conn.execute('''
-            INSERT INTO analytics_events (user_id, event_type, event_details)
-            VALUES ($1, $2, $3)
-        ''', user_id, event_type, details_json)
+        total_users = await conn.fetchval("SELECT COUNT(*) FROM users")
+        total_addresses = await conn.fetchval("SELECT COUNT(*) FROM user_addresses")
+        return {
+            'total_users': total_users,
+            'total_addresses': total_addresses
+        }
 
-# <3
+async def get_user_notification_count(user_id: int) -> int:
+     if not pool: return 0
+     async with pool.acquire() as conn:
+        return await conn.fetchval("SELECT COUNT(*) FROM sent_notifications WHERE user_id = $1", user_id)

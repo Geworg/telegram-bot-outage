@@ -8,7 +8,6 @@ python-telegram-bot[job-queue]==21.2
 pytz==2024.1
 requests==2.32.3
 sentencepiece==0.2.0
-requests==2.32.3
 transformers==4.41.2
 torch==2.3.0
 tqdm==4.67.1
