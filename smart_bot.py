@@ -31,7 +31,7 @@ from telegram.ext import (
     JobQueue
 )
 from telegram.constants import ParseMode, ChatAction
-from telegram.error import Forbidden
+from telegram.error import Forbidden, BadRequest
 
 # --- Local Modules ---
 import db_manager
