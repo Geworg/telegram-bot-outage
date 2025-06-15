@@ -2,16 +2,14 @@ import os
 import urllib.parse
 
 # --- Constants for Contact Information ---
-# It's better to get the support chat ID from environment variables
 SUPPORT_CHAT_ID = os.getenv("SUPPORT_CHAT_ID")
-CONTACT_PHONE_NUMBER = "+37412345678"  # Replace with your actual phone number
-CONTACT_ADDRESS_TEXT = "Gyumri, Shirak Province, Armenia" # Replace with your address
-ENCODED_ADDRESS_FOR_MAP = urllib.parse.quote(CONTACT_ADDRESS_TEXT)
-MAP_URL = f"https://www.google.com/maps/search/?api=1&query={ENCODED_ADDRESS_FOR_MAP}"
-
-# Using markdown_v2 escape for phone number
-CLICKABLE_PHONE_MD = f"📞 [{CONTACT_PHONE_NUMBER.replace('+', '\\+')}]({CONTACT_PHONE_NUMBER})"
-CLICKABLE_ADDRESS_MD = f"📍 [{CONTACT_ADDRESS_TEXT}]({MAP_URL})"
+CONTACT_PHONE_NUMBER = "+37412345678"
+PLACE_ID = "ChIJx_fIM5i9akARt38HYgW6IOk"
+MAP_URL = f"https://www.google.com/maps/search/?api=1&query=place_id:{PLACE_ID}"
+ENCODED_ADDRESS_FOR_MAP = urllib.parse.quote(PLACE_ID)
+escaped_number = CONTACT_PHONE_NUMBER.replace('+', '\\+')
+CLICKABLE_PHONE_MD = f"📞 [{escaped_number}]({CONTACT_PHONE_NUMBER})"
+CLICKABLE_ADDRESS_MD = f"📍 [{PLACE_ID}]({MAP_URL})"
 
 # --- Tier Labels ---
 TIER_LABELS = {
@@ -82,7 +80,7 @@ translations = {
     "sound_toggle_off": {"hy": "🔇 Անջատել բոլոր ձայները", "ru": "🔇 Выключить все звуки", "en": "🔇 Disable All Sounds"},
     "sound_on_status": {"hy": "Հիմնական ձայնը՝ ✅ Միացված", "ru": "Основной звук: ✅ Включен", "en": "Main Sound: ✅ Enabled"},
     "sound_off_status": {"hy": "Հիմնական ձայնը՝ ❌ Անջատված", "ru": "Основной звук: ❌ Выключен", "en": "Main Sound: ❌ Disabled"},
-    "silent_mode_toggle_on": {"hy": "🌙 Միացնել լուռ ռեժիմը", "ru": "� Включить тихий режим", "en": "🌙 Enable Silent Mode"},
+    "silent_mode_toggle_on": {"hy": "🌙 Միացնել լուռ ռեժիմը", "ru": "🌙 Включить тихий режим", "en": "🌙 Enable Silent Mode"},
     "silent_mode_toggle_off": {"hy": "☀️ Անջատել լուռ ռեժիմը", "ru": "☀️ Выключить тихий режим", "en": "☀️ Disable Silent Mode"},
     "silent_mode_on_status": {"hy": "Լուռ ռեժիմ՝ ✅ {start} - {end}", "ru": "Тихий режим: ✅ {start} - {end}", "en": "Silent Mode: ✅ {start} - {end}"},
     "silent_mode_off_status": {"hy": "Լուռ ռեժիմ՝ ❌ Անջատված", "ru": "Тихий режим: ❌ Выключен", "en": "Silent Mode: ❌ Disabled"},

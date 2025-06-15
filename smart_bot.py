@@ -75,20 +75,24 @@ FREQUENCY_OPTIONS = {
 
 # --- Helper & Utility Functions ---
 def get_user_lang(context: ContextTypes.DEFAULT_TYPE) -> str:
+    """Gets user language from context, falling back to 'en'."""
     return context.user_data.get("lang", "en")
 
 def get_text(key: str, lang: str, **kwargs) -> str:
+    """Gets translated text, falling back to the key itself."""
     return translations.get(key, {}).get(lang, f"<{key}>").format(**kwargs)
 
 async def send_typing_periodically(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
+    """Sends 'typing' action every 4.5 seconds until cancelled."""
     try:
         while True:
             await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
             await asyncio.sleep(4.5)
     except asyncio.CancelledError:
-        pass
+        pass # Expected when the task is cancelled.
 
 def admin_only(func: Callable):
+    """Decorator to restrict command access to admins."""
     async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
         if update.effective_user.id not in ADMIN_IDS:
             lang = get_user_lang(context)
@@ -129,7 +133,10 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["lang"] = user_in_db['language_code']
         context.user_data["step"] = UserSteps.NONE.name
         lang = user_in_db['language_code']
-        await update.message.reply_text(get_text("menu_message", lang), reply_markup=get_main_menu_keyboard(lang))
+        await update.message.reply_text(
+            get_text("menu_message", lang),
+            reply_markup=get_main_menu_keyboard(lang)
+        )
 
 async def add_address_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lang = get_user_lang(context)
@@ -238,11 +245,15 @@ async def sound_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
     keyboard = InlineKeyboardMarkup(buttons)
     
-    # Check if called from a button click to edit message, otherwise send new
-    if update.callback_query:
-        await update.callback_query.edit_message_text(text, reply_markup=keyboard)
-    else:
-        await update.message.reply_text(text, reply_markup=keyboard)
+    target_message = update.callback_query.message if update.callback_query else update.message
+    try:
+        if update.callback_query:
+            await target_message.edit_text(text, reply_markup=keyboard)
+        else:
+            await target_message.reply_text(text, reply_markup=keyboard)
+    except BadRequest as e:
+        if "Message is not modified" not in str(e):
+            log.warning(f"Failed to edit sound menu: {e}")
 
 @admin_only
 async def maintenance_on_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -318,7 +329,10 @@ async def handle_language_selection(update: Update, context: ContextTypes.DEFAUL
     context.user_data["lang"] = lang_code
     await db_manager.update_user_language(update.effective_user.id, lang_code)
     
-    await update.message.reply_text(get_text("language_set_success", lang_code), reply_markup=get_main_menu_keyboard(lang_code))
+    await update.message.reply_text(
+        get_text("language_set_success", lang_code),
+        reply_markup=get_main_menu_keyboard(lang_code)
+    )
     context.user_data["step"] = UserSteps.NONE.name
     
 async def handle_region_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -479,10 +493,9 @@ async def check_outages_for_new_address(update: Update, context: ContextTypes.DE
     if not all_recent_outages:
         await context.bot.send_message(chat_id, get_text("outage_check_on_add_none_found", lang))
     else:
-        # Simplified response
         response_text = get_text("outage_check_on_add_found", lang)
         for outage in all_recent_outages:
-             response_text += f"\n- {outage['source_type']}: {outage.get('start_datetime', 'N/A')}"
+             response_text += f"\n\n- {outage['source_type']}: {outage.get('start_datetime', 'N/A')}"
         await context.bot.send_message(chat_id, response_text)
 
     last_outage = await db_manager.get_last_outage_for_address(address_data['full_address'])
@@ -510,7 +523,7 @@ async def qa_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
     else:
         answer_key = f"qa_placeholder_a{action}"
         await query.answer(text=get_text(answer_key, lang), show_alert=True)
-
+        
 async def sound_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     user_id = query.from_user.id
@@ -528,15 +541,12 @@ async def sound_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
             context.user_data["step"] = UserSteps.AWAITING_SILENT_INTERVAL.name
             await query.message.reply_text(get_text("enter_silent_interval_prompt", lang))
             return
-            
+
     elif action == "sound_back":
         await query.delete()
         return
-
-    try:
-        await query.delete()
-    except BadRequest: pass
-    await sound_command(update.callback_query, context)
+        
+    await sound_command(update, context)
 
 async def cancel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lang = get_user_lang(context)

@@ -1,0 +1,106 @@
+2025-06-15 15:44:10,679 - apscheduler.scheduler - INFO - Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2025-06-15 15:44:10,679 - __main__ - INFO - Scheduled 'site_check' job to run every 1800 seconds.
+2025-06-15 15:44:10,679 - __main__ - INFO - Starting bot polling...
+2025-06-15 15:44:11,179 - httpx - INFO - HTTP Request: POST https://api.telegram.org/botREMOVED/getMe "HTTP/1.1 200 OK"
+2025-06-15 15:44:11,226 - db_manager - CRITICAL - Failed to create database connection pool: [Errno 11001] getaddrinfo failed
+Traceback (most recent call last):
+  File "C:\Users\Gevorg\Gevorg_computer\Diploma_work\My\Projects\With_AI\With_neuromodels\Project\db_manager.py", line 19, in init_db_pool
+    pool = await asyncpg.create_pool(dsn=os.getenv("DATABASE_URL"))
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Gevorg\AppData\Local\Programs\Python\Python311\Lib\site-packages\asyncpg\pool.py", line 403, in _async__init__
+    await self._initialize()
+  File "C:\Users\Gevorg\AppData\Local\Programs\Python\Python311\Lib\site-packages\asyncpg\pool.py", line 430, in _initialize
+    await first_ch.connect()
+  File "C:\Users\Gevorg\AppData\Local\Programs\Python\Python311\Lib\site-packages\asyncpg\pool.py", line 128, in connect
+    self._con = await self._pool._get_new_connection()
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Gevorg\AppData\Local\Programs\Python\Python311\Lib\site-packages\asyncpg\pool.py", line 502, in _get_new_connection
+    con = await connection.connect(
+          ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Gevorg\AppData\Local\Programs\Python\Python311\Lib\site-packages\asyncpg\connection.py", line 2329, in connect
+    return await connect_utils._connect(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Gevorg\AppData\Local\Programs\Python\Python311\Lib\site-packages\asyncpg\connect_utils.py", line 1017, in _connect
+    raise last_error or exceptions.TargetServerAttributeNotMatched(
+  File "C:\Users\Gevorg\AppData\Local\Programs\Python\Python311\Lib\site-packages\asyncpg\connect_utils.py", line 991, in _connect
+    conn = await _connect_addr(
+           ^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Gevorg\AppData\Local\Programs\Python\Python311\Lib\site-packages\asyncpg\connect_utils.py", line 828, in _connect_addr
+    return await __connect_addr(params, True, *args)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Gevorg\AppData\Local\Programs\Python\Python311\Lib\site-packages\asyncpg\connect_utils.py", line 873, in __connect_addr
+    tr, pr = await connector
+             ^^^^^^^^^^^^^^^
+  File "C:\Users\Gevorg\AppData\Local\Programs\Python\Python311\Lib\site-packages\asyncpg\connect_utils.py", line 744, in _create_ssl_connection
+    tr, pr = await loop.create_connection(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Gevorg\AppData\Local\Programs\Python\Python311\Lib\asyncio\base_events.py", line 1046, in create_connection
+    infos = await self._ensure_resolved(
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Gevorg\AppData\Local\Programs\Python\Python311\Lib\asyncio\base_events.py", line 1420, in _ensure_resolved
+    return await loop.getaddrinfo(host, port, family=family, type=type,
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Gevorg\AppData\Local\Programs\Python\Python311\Lib\asyncio\base_events.py", line 868, in getaddrinfo
+    return await self.run_in_executor(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Gevorg\AppData\Local\Programs\Python\Python311\Lib\concurrent\futures\thread.py", line 58, in run
+    result = self.fn(*self.args, **self.kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Gevorg\AppData\Local\Programs\Python\Python311\Lib\socket.py", line 962, in getaddrinfo
+    for res in _socket.getaddrinfo(host, port, family, type, proto, flags):
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+socket.gaierror: [Errno 11001] getaddrinfo failed
+2025-06-15 15:44:11,382 - __main__ - INFO - Bot shut down gracefully.
+2025-06-15 16:03:55,693 - apscheduler.scheduler - INFO - Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2025-06-15 16:03:55,693 - __main__ - INFO - Scheduled 'site_check' job to run every 1800 seconds.
+2025-06-15 16:03:55,693 - __main__ - INFO - Starting bot polling...
+2025-06-15 16:03:55,943 - httpx - INFO - HTTP Request: POST https://api.telegram.org/botREMOVED/getMe "HTTP/1.1 200 OK"
+2025-06-15 16:03:55,943 - db_manager - CRITICAL - Failed to create database connection pool: [Errno 11001] getaddrinfo failed
+Traceback (most recent call last):
+  File "C:\Users\Gevorg\Gevorg_computer\Diploma_work\My\Projects\With_AI\With_neuromodels\Project\db_manager.py", line 19, in init_db_pool
+    pool = await asyncpg.create_pool(dsn=os.getenv("DATABASE_URL"))
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Gevorg\AppData\Local\Programs\Python\Python311\Lib\site-packages\asyncpg\pool.py", line 403, in _async__init__
+    await self._initialize()
+  File "C:\Users\Gevorg\AppData\Local\Programs\Python\Python311\Lib\site-packages\asyncpg\pool.py", line 430, in _initialize
+    await first_ch.connect()
+  File "C:\Users\Gevorg\AppData\Local\Programs\Python\Python311\Lib\site-packages\asyncpg\pool.py", line 128, in connect
+    self._con = await self._pool._get_new_connection()
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Gevorg\AppData\Local\Programs\Python\Python311\Lib\site-packages\asyncpg\pool.py", line 502, in _get_new_connection
+    con = await connection.connect(
+          ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Gevorg\AppData\Local\Programs\Python\Python311\Lib\site-packages\asyncpg\connection.py", line 2329, in connect
+    return await connect_utils._connect(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Gevorg\AppData\Local\Programs\Python\Python311\Lib\site-packages\asyncpg\connect_utils.py", line 1017, in _connect
+    raise last_error or exceptions.TargetServerAttributeNotMatched(
+  File "C:\Users\Gevorg\AppData\Local\Programs\Python\Python311\Lib\site-packages\asyncpg\connect_utils.py", line 991, in _connect
+    conn = await _connect_addr(
+           ^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Gevorg\AppData\Local\Programs\Python\Python311\Lib\site-packages\asyncpg\connect_utils.py", line 828, in _connect_addr
+    return await __connect_addr(params, True, *args)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Gevorg\AppData\Local\Programs\Python\Python311\Lib\site-packages\asyncpg\connect_utils.py", line 873, in __connect_addr
+    tr, pr = await connector
+             ^^^^^^^^^^^^^^^
+  File "C:\Users\Gevorg\AppData\Local\Programs\Python\Python311\Lib\site-packages\asyncpg\connect_utils.py", line 744, in _create_ssl_connection
+    tr, pr = await loop.create_connection(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Gevorg\AppData\Local\Programs\Python\Python311\Lib\asyncio\base_events.py", line 1046, in create_connection
+    infos = await self._ensure_resolved(
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Gevorg\AppData\Local\Programs\Python\Python311\Lib\asyncio\base_events.py", line 1420, in _ensure_resolved
+    return await loop.getaddrinfo(host, port, family=family, type=type,
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Gevorg\AppData\Local\Programs\Python\Python311\Lib\asyncio\base_events.py", line 868, in getaddrinfo
+    return await self.run_in_executor(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Gevorg\AppData\Local\Programs\Python\Python311\Lib\concurrent\futures\thread.py", line 58, in run
+    result = self.fn(*self.args, **self.kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Gevorg\AppData\Local\Programs\Python\Python311\Lib\socket.py", line 962, in getaddrinfo
+    for res in _socket.getaddrinfo(host, port, family, type, proto, flags):
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+socket.gaierror: [Errno 11001] getaddrinfo failed
+2025-06-15 16:03:55,959 - __main__ - INFO - Bot shut down gracefully.

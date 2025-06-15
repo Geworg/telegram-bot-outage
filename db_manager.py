@@ -16,13 +16,7 @@ async def init_db_pool():
     if pool:
         return
     try:
-        pool = await asyncpg.create_pool(
-            user=os.getenv("DB_USER"),
-            password=os.getenv("DB_PASSWORD"),
-            database=os.getenv("DB_NAME"),
-            host=os.getenv("DB_HOST"),
-            port=os.getenv("DB_PORT")
-        )
+        pool = await asyncpg.create_pool(dsn=os.getenv("DATABASE_URL"))
         log.info("Database connection pool created successfully.")
         await setup_schema()
     except Exception as e:
