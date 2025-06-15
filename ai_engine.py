@@ -1,12 +1,16 @@
+import os
 import logging
 from typing import List, Dict, Any, Optional
-
 try:
     from transformers import pipeline, MarianMTModel, MarianTokenizer, AutoTokenizer, AutoModelForTokenClassification
     import torch
     TRANSFORMERS_AVAILABLE = True
 except ImportError:
     TRANSFORMERS_AVAILABLE = False
+
+os.environ["TRANSFORMERS_CACHE"] = "/tmp/huggingface"
+trans_model_name = os.getenv("TRANSLATION_MODEL", "Helsinki-NLP/opus-mt-hy-en")
+ner_model_name = os.getenv("NER_MODEL", "dslim/bert-base-NER")
 
 log = logging.getLogger(__name__)
 
@@ -15,7 +19,6 @@ log = logging.getLogger(__name__)
 translator_pipeline = None
 ner_pipeline = None
 models_loaded = False
-
 
 def load_models():
     """
@@ -71,11 +74,9 @@ def load_models():
         ner_pipeline = None
         models_loaded = False
 
-
 def is_ai_available() -> bool:
     """Checks if the necessary AI models have been loaded successfully."""
     return models_loaded
-
 
 def translate_armenian_to_english(text: str) -> Optional[str]:
     """Translates a string of Armenian text to English using the loaded pipeline."""
@@ -89,7 +90,6 @@ def translate_armenian_to_english(text: str) -> Optional[str]:
     except Exception as e:
         log.error(f"An error occurred during translation: {e}", exc_info=True)
         return None
-
 
 def extract_entities_from_text(text: str) -> List[Dict[str, Any]]:
     """
@@ -116,5 +116,3 @@ def extract_entities_from_text(text: str) -> List[Dict[str, Any]]:
     except Exception as e:
         log.error(f"An error occurred during entity extraction: {e}", exc_info=True)
         return []
-
-# <3

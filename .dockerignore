@@ -11,3 +11,15 @@ __pycache__/
 .git/
 .vscode/
 node_modules/
+*.pkl
+*.zip
+*.tar.gz
+venv/
+*.ipynb
+~/.cache/
+~/.huggingface/
+models/
+datasets/
+.cache/
+.huggingface/
+.idea/
