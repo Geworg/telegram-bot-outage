@@ -31,7 +31,7 @@ from telegram.ext import (
     JobQueue
 )
 from telegram.constants import ParseMode, ChatAction
-from telegram.error import Forbidden, BadRequest
+from telegram.error import Forbidden, BadRequest, TimedOut, NetworkError
 
 # --- Local Modules ---
 import db_manager
@@ -83,13 +83,12 @@ def get_text(key: str, lang: str, **kwargs) -> str:
     return translations.get(key, {}).get(lang, f"<{key}>").format(**kwargs)
 
 async def send_typing_periodically(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
-    """Sends 'typing' action every 4.5 seconds until cancelled."""
     try:
         while True:
             await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
-            await asyncio.sleep(4.5)
+            await asyncio.sleep(0.9)
     except asyncio.CancelledError:
-        pass # Expected when the task is cancelled.
+        pass
 
 def admin_only(func: Callable):
     """Decorator to restrict command access to admins."""

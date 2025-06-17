@@ -1,3 +1,5 @@
+# api_clients.py
+
 import os
 import httpx
 import logging
@@ -5,12 +7,8 @@ from typing import Optional, Dict, Any
 
 log = logging.getLogger(__name__)
 
-YANDEX_API_KEY = os.getenv("YANDEX_API_KEY")
-
 async def get_verified_address_from_yandex(address_text: str, lang: str = "ru_RU") -> Optional[Dict[str, Any]]:
-    """
-    Uses Yandex Geocoder API to get a canonical address and coordinates, biased towards Armenia.
-    """
+    YANDEX_API_KEY = os.getenv("YANDEX_API_KEY")
     if not YANDEX_API_KEY:
         log.warning("YANDEX_API_KEY is not set. Geocoding is disabled.")
         return None

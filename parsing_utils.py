@@ -136,5 +136,3 @@ def structure_ner_entities(entities: List[Dict[str, Any]], original_english_text
     structured_data['details']['english_text'] = original_english_text
 
     return structured_data
-
-# <3

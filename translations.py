@@ -34,9 +34,9 @@ translations = {
     # --- General UI ---
     "cancel": {"hy": "❌ Չեղարկել", "ru": "❌ Отменить", "en": "❌ Cancel"},
     "yes": {"hy": "✅ Այո", "ru": "✅ Да", "en": "✅ Yes"},
-    "no": {"hy": "Ոչ", "ru": "Нет", "en": "No"},
+    "no": {"hy": "⛔ Ոչ", "ru": "⛔ Нет", "en": "⛔ No"},
     "back_btn": {"hy": "⬅️ Հետ", "ru": "⬅️ Назад", "en": "⬅️ Back"},
-    "menu_message": {"hy": "Գլխավոր մենյու:", "ru": "Главное меню:", "en": "Main menu:"},
+    "menu_message": {"hy": "Գլխավոր մենյու․", "ru": "Главное меню:", "en": "Main menu:"},
     "action_cancelled": {"hy": "Գործողությունը չեղարկվեց։", "ru": "Действие отменено.", "en": "Action cancelled."},
     "error_generic": {"hy": "Տեղի է ունեցել սխալ։ Խնդրում եմ փորձել մի փոքր ուշ։", "ru": "Произошла ошибка. Пожалуйста, попробуйте немного позже.", "en": "An error occurred. Please try again later."},
     "unknown_command": {"hy": "Անհայտ հրաման։ Օգտվեք կոճակներից։", "ru": "Неизвестная команда. Воспользуйтесь кнопками.", "en": "Unknown command. Please use the buttons."},
