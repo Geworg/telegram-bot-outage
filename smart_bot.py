@@ -86,7 +86,7 @@ async def send_typing_periodically(context: ContextTypes.DEFAULT_TYPE, chat_id: 
     try:
         while True:
             await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
-            await asyncio.sleep(0.9)
+            await asyncio.sleep(0.1)
     except asyncio.CancelledError:
         pass
 

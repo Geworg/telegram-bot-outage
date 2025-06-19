@@ -59,7 +59,7 @@ def load_models():
         ner_pipeline = pipeline(
             "ner",
             model=ner_model_name,
-            aggregation_strategy="simple",  # Groups sub-words (e.g., "New", "York" -> "New York")
+            aggregation_strategy="simple", # Groups sub-words (e.g., "New", "York" -> "New York")
             device=device
         )
         log.info("NER model loaded successfully.")

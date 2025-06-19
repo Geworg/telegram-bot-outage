@@ -1,5 +1,3 @@
-# api_clients.py
-
 import os
 import httpx
 import logging
