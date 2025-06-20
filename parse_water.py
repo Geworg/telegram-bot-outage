@@ -4,7 +4,7 @@ from bs4 import BeautifulSoup
 import logging
 from typing import List
 
-# New local imports
+# New local imports. ai_engine functions are now async, so we need to await them
 from ai_engine import is_ai_available, translate_armenian_to_english, extract_entities_from_text
 from parsing_utils import get_text_hash, structure_ner_entities
 import db_manager
@@ -52,14 +52,14 @@ async def process_and_store_announcement(announcement: dict):
     raw_armenian_text = announcement['text']
     source_url = announcement['url']
     
-    # 1. Translate
-    english_text = translate_armenian_to_english(raw_armenian_text)
+    # 1. Translate - Await the async AI function
+    english_text = await translate_armenian_to_english(raw_armenian_text)
     if not english_text:
         log.warning("Translation failed for a water announcement.")
         return
 
-    # 2. Extract Entities
-    entities = extract_entities_from_text(english_text)
+    # 2. Extract Entities - Await the async AI function
+    entities = await extract_entities_from_text(english_text)
     if not entities:
         log.info("No entities found in translated water announcement.")
         return
@@ -92,7 +92,7 @@ async def parse_all_water_announcements_async():
     Main orchestrator function for water parsing. Fetches, processes, and stores all water announcements.
     """
     if not is_ai_available():
-        log.error("Cannot parse water announcements: AI models are not available.")
+        log.error("Cannot parse water announcements: AI models are not available (API keys missing).")
         return
 
     log.info("Starting full water announcement parsing cycle...")
@@ -106,5 +106,3 @@ async def parse_all_water_announcements_async():
     await asyncio.gather(*tasks)
     
     log.info("Finished water announcement parsing cycle.")
-
-# <3
