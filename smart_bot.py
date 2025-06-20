@@ -9,7 +9,9 @@ from datetime import datetime, time as dt_time
 from typing import Dict, List, Optional, Callable
 
 # --- Third-party Libraries ---
-from dotenv import load_dotenv
+from dotenv import load_dotenv # Moved to top
+load_dotenv() # Load environment variables as early as possible
+
 from telegram import (
     Update,
     KeyboardButton,
@@ -43,7 +45,7 @@ from parse_gas import parse_all_gas_announcements_async
 from parse_electric import parse_all_electric_announcements_async
 
 # --- Initial Setup ---
-load_dotenv()
+# load_dotenv() # Removed from here, moved to top of file
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO"),
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -755,7 +757,7 @@ async def periodic_notification_job(context: ContextTypes.DEFAULT_TYPE):
 
 async def post_init(application: Application):
     await db_manager.init_db_pool()
-    ai_engine.initialize_api_status() # New: Initialize API key check
+    ai_engine.initialize_api_status() # Initialize API key check after .env is loaded
     
     # Set up bot commands
     await application.bot.set_my_commands([
