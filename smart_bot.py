@@ -45,7 +45,6 @@ from parse_gas import parse_all_gas_announcements_async
 from parse_electric import parse_all_electric_announcements_async
 
 # --- Initial Setup ---
-# load_dotenv() # Removed from here, moved to top of file
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO"),
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -62,7 +61,8 @@ class UserSteps(Enum):
     AWAITING_FREQUENCY = auto()
     AWAITING_SUPPORT_MESSAGE = auto()
     AWAITING_SILENT_INTERVAL = auto()
-    AWAITING_SILENT_INTERVAL_CONFIRMATION = auto() # New: for confirming fuzzy time input
+    AWAITING_SILENT_INTERVAL_CONFIRMATION = auto()
+    AWAITING_CLEAR_ADDRESSES_CONFIRMATION = auto() # New: for confirming address clear
 
 ADMIN_IDS = [int(i) for i in os.getenv("ADMIN_USER_IDS", "").split(',') if i]
 SUPPORT_CHAT_ID = os.getenv("SUPPORT_CHAT_ID")
@@ -92,7 +92,12 @@ def requires_admin(func: Callable) -> Callable:
     async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
         if update.effective_user.id not in ADMIN_IDS:
             lang = get_user_lang(context)
-            await update.message.reply_text(get_text("admin_unauthorized", lang))
+            # Use update.message.reply_text if it's a command/message, query.edit_message_text if it's a callback
+            if update.message:
+                await update.message.reply_text(get_text("admin_unauthorized", lang))
+            elif update.callback_query:
+                await update.callback_query.answer(get_text("admin_unauthorized", lang), show_alert=True)
+                await update.callback_query.message.edit_text(get_text("admin_unauthorized", lang)) # Or simply remove the buttons
             return
         return await func(update, context, *args, **kwargs)
     return wrapper
@@ -177,7 +182,7 @@ async def my_addresses_command(update: Update, context: ContextTypes.DEFAULT_TYP
     lang = get_user_lang(context)
     addresses = await db_manager.get_user_addresses(user_id)
     if not addresses:
-        await update.message.reply_text(get_text("no_addresses_yet", lang))
+        await (update.message or update.callback_query.message).reply_text(get_text("no_addresses_yet", lang))
         return
 
     address_list_text = get_text("your_addresses", lang) + "\n"
@@ -187,14 +192,14 @@ async def my_addresses_command(update: Update, context: ContextTypes.DEFAULT_TYP
         keyboard_buttons.append([InlineKeyboardButton(f"❌ {addr['full_address_text']}", callback_data=f"remove_address:{addr['address_id']}")])
 
     reply_markup = InlineKeyboardMarkup(keyboard_buttons) if keyboard_buttons else None
-    await update.message.reply_text(address_list_text, reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN)
+    await (update.message or update.callback_query.message).reply_text(address_list_text, reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN)
 
 async def frequency_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     lang = get_user_lang(context)
     user = await db_manager.get_user(user_id)
     if not user:
-        await update.message.reply_text(get_text("user_not_found", lang))
+        await (update.message or update.callback_query.message).reply_text(get_text("user_not_found", lang))
         return
 
     current_frequency_seconds = user['frequency_seconds']
@@ -219,7 +224,7 @@ async def frequency_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard_buttons.append([InlineKeyboardButton(get_text("back_to_main_menu_btn", lang), callback_data="main_menu")])
 
     reply_markup = InlineKeyboardMarkup(keyboard_buttons)
-    await update.message.reply_text(get_text("choose_frequency", lang).format(current_frequency=get_text(f"Free_{current_frequency_seconds/3600:.0f}h", lang) if current_frequency_seconds >= 3600 else get_text(f"Premium_{current_frequency_seconds/60:.0f}m", lang)), reply_markup=reply_markup)
+    await (update.message or update.callback_query.message).reply_text(get_text("choose_frequency", lang).format(current_frequency=get_text(f"Free_{current_frequency_seconds/3600:.0f}h", lang) if current_frequency_seconds >= 3600 else get_text(f"Premium_{current_frequency_seconds/60:.0f}m", lang)), reply_markup=reply_markup)
 
 async def sound_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -248,7 +253,7 @@ async def sound_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Check if the update is from a callback query (meaning a message already exists)
         if update.callback_query and update.callback_query.message:
             await update.callback_query.message.edit_text(get_text("sound_settings_prompt", lang), reply_markup=reply_markup)
-        else:
+        elif update.message:
             # Otherwise, send a new message
             await update.message.reply_text(get_text("sound_settings_prompt", lang), reply_markup=reply_markup)
     except BadRequest as e:
@@ -257,7 +262,7 @@ async def sound_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if update.callback_query and update.callback_query.message:
             # If it was a callback, send a new message to the chat
             await update.callback_query.message.reply_text(get_text("sound_settings_prompt", lang), reply_markup=reply_markup)
-        else:
+        elif update.message:
             await update.message.reply_text(get_text("sound_settings_prompt", lang), reply_markup=reply_markup)
 
 
@@ -280,7 +285,7 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     last_check_end_formatted = datetime.fromisoformat(last_check_end).strftime('%Y-%m-%d %H:%M:%S') if last_check_end else 'N/A'
 
 
-    await update.message.reply_text(
+    await (update.message or update.callback_query.message).reply_text(
         get_text(
             "stats_message",
             lang,
@@ -298,26 +303,39 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def clear_addresses_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     lang = get_user_lang(context)
-    await db_manager.clear_all_user_addresses(user_id)
-    await update.message.reply_text(get_text("all_addresses_cleared", lang))
+
+    addresses = await db_manager.get_user_addresses(user_id)
+    if not addresses:
+        await (update.message or update.callback_query.message).reply_text(get_text("no_addresses_to_clear", lang))
+        return
+
+    keyboard = [
+        [InlineKeyboardButton(get_text("yes_delete_all_btn", lang), callback_data="clear_addresses_confirm:yes")],
+        [InlineKeyboardButton(get_text("no_cancel_btn", lang), callback_data="clear_addresses_confirm:no")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await (update.message or update.callback_query.message).reply_text(get_text("clear_addresses_confirmation", lang), reply_markup=reply_markup)
+    context.user_data["step"] = UserSteps.AWAITING_CLEAR_ADDRESSES_CONFIRMATION.name
+    log.info(f"User {user_id} initiated clear addresses command, awaiting confirmation.")
+
 
 async def qa_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lang = get_user_lang(context)
     keyboard = [[InlineKeyboardButton(get_text("contact_support_btn", lang), callback_data="contact_support")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text(get_text("qa_title", lang), reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN)
+    await (update.message or update.callback_query.message).reply_text(get_text("qa_title", lang), reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN)
 
 @requires_admin
 async def maintenance_on_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lang = get_user_lang(context)
     await db_manager.set_bot_status("maintenance_mode", "on")
-    await update.message.reply_text(get_text("maintenance_on_feedback", lang))
+    await (update.message or update.callback_query.message).reply_text(get_text("maintenance_on_feedback", lang))
 
 @requires_admin
 async def maintenance_off_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lang = get_user_lang(context)
     await db_manager.set_bot_status("maintenance_mode", "off")
-    await update.message.reply_text(get_text("maintenance_off_feedback", lang))
+    await (update.message or update.callback_query.message).reply_text(get_text("maintenance_off_feedback", lang))
 
 # --- Message Handler ---
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -352,12 +370,45 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["step"] = UserSteps.NONE.name
         log.info(f"User {user_id} set language to {lang_code}.")
 
+    elif current_step == UserSteps.NONE.name:
+        # Handle main menu button presses (which come as text messages)
+        if user_text == get_text("add_address_btn", lang):
+            context.user_data["step"] = UserSteps.AWAITING_REGION.name
+            region_keyboard = [[KeyboardButton(region)] for region in REGIONS_LIST]
+            await update.message.reply_text(get_text("choose_region", lang), reply_markup=ReplyKeyboardMarkup(region_keyboard, resize_keyboard=True))
+            log.info(f"User {user_id} chose to add address.")
+        elif user_text == get_text("remove_address_btn", lang):
+            # This should ideally be handled by my_addresses_command which offers removal
+            # For now, let's just re-trigger my_addresses_command
+            await my_addresses_command(update, context)
+            log.info(f"User {user_id} chose to remove address.")
+        elif user_text == get_text("my_addresses_btn", lang):
+            await my_addresses_command(update, context)
+            log.info(f"User {user_id} chose to view my addresses.")
+        elif user_text == get_text("frequency_btn", lang):
+            await frequency_command(update, context)
+            log.info(f"User {user_id} chose to change frequency.")
+        elif user_text == get_text("sound_settings_btn", lang):
+            await sound_command(update, context)
+            log.info(f"User {user_id} chose sound settings.")
+        elif user_text == get_text("qa_btn", lang):
+            await qa_command(update, context)
+            log.info(f"User {user_id} chose Q&A.")
+        elif user_text == get_text("contact_support_btn", lang):
+            # This should trigger the contact support flow
+            await qa_command(update, context) # Re-using qa_command to show support options
+            log.info(f"User {user_id} chose to contact support via main menu button.")
+        else:
+            # Fallback for unrecognized text input when not in a specific step
+            await update.message.reply_text(get_text("unrecognized_command", lang), reply_markup=get_main_menu_keyboard(lang))
+            log.warning(f"User {user_id} in NONE step sent unrecognized text: {user_text}")
+
     elif current_step == UserSteps.AWAITING_REGION.name:
         selected_region = user_text.strip()
         if selected_region in REGIONS_LIST:
             context.user_data["address_region"] = selected_region
             context.user_data["step"] = UserSteps.AWAITING_STREET.name
-            await update.message.reply_text(get_text("enter_street", lang))
+            await update.message.reply_text(get_text("enter_street", lang), reply_markup=ReplyKeyboardRemove())
             log.info(f"User {user_id} selected region: {selected_region}.")
         else:
             await update.message.reply_text(get_text("invalid_region", lang))
@@ -461,9 +512,9 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             log.warning(f"User {user_id} entered unrecognized time format: {user_text}")
 
     else:
-        # Default fallback for unhandled text messages
+        # Default fallback for unrecognized text input when not in a specific step (commands are handled by CommandHandler)
         await update.message.reply_text(get_text("unrecognized_command", lang), reply_markup=get_main_menu_keyboard(lang))
-        context.user_data["step"] = UserSteps.NONE.name
+        log.warning(f"User {user_id} sent unrecognized text and not in a specific step: {user_text}")
 
 
 # --- Callback Query Handler ---
@@ -641,6 +692,25 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
     elif query.data == "unauthorized":
         await query.answer(get_text("feature_not_available_for_tier", lang), show_alert=True)
         log.info(f"User {user_id} tried to access unauthorized feature via callback.")
+    
+    # --- New: Clear Addresses Confirmation Callbacks ---
+    elif query.data == "clear_addresses_confirm:yes":
+        lang = get_user_lang(context)
+        removed = await db_manager.clear_all_user_addresses(user_id)
+        if removed:
+            await query.edit_message_text(get_text("all_addresses_cleared", lang))
+            log.info(f"User {user_id} confirmed and cleared all addresses.")
+        else:
+            await query.edit_message_text(get_text("clear_addresses_failed", lang))
+            log.warning(f"User {user_id} confirmed clear but no addresses were cleared (or error occurred).")
+        context.user_data["step"] = UserSteps.NONE.name
+        await query.message.reply_markup(reply_markup=get_main_menu_keyboard(lang)) # Show main menu keyboard
+
+    elif query.data == "clear_addresses_confirm:no":
+        lang = get_user_lang(context)
+        await query.edit_message_text(get_text("clear_addresses_cancelled", lang))
+        context.user_data["step"] = UserSteps.NONE.name
+        await query.message.reply_markup(reply_markup=get_main_menu_keyboard(lang)) # Show main menu keyboard
 
     else:
         # Default fallback for unhandled callbacks
