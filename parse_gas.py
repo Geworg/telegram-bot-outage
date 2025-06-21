@@ -4,7 +4,7 @@ from bs4 import BeautifulSoup
 import logging
 from typing import List, Dict
 
-# New local imports. ai_engine functions are now async, so we need to await them
+# New local imports
 from ai_engine import is_ai_available, translate_armenian_to_english, extract_entities_from_text
 from parsing_utils import get_text_hash, structure_ner_entities
 import db_manager
@@ -64,13 +64,12 @@ async def process_and_store_gas_announcement(announcement: dict):
     source_url = announcement['url']
     inferred_type = announcement['type']
 
-    # Await the async AI functions
-    english_text = await translate_armenian_to_english(raw_armenian_text)
+    english_text = translate_armenian_to_english(raw_armenian_text)
     if not english_text:
         log.warning("Translation failed for a gas announcement.")
         return
 
-    entities = await extract_entities_from_text(english_text)
+    entities = extract_entities_from_text(english_text)
     if not entities:
         log.info("No entities found in translated gas announcement.")
         return
@@ -103,7 +102,7 @@ async def parse_all_gas_announcements_async():
     Main orchestrator function for gas parsing.
     """
     if not is_ai_available():
-        log.error("Cannot parse gas announcements: AI models are not available (API keys missing).")
+        log.error("Cannot parse gas announcements: AI models are not available.")
         return
 
     log.info("Starting full gas announcement parsing cycle...")
@@ -117,3 +116,5 @@ async def parse_all_gas_announcements_async():
     await asyncio.gather(*tasks)
     
     log.info("Finished gas announcement parsing cycle.")
+
+# <3

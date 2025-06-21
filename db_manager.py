@@ -45,243 +45,197 @@ async def setup_schema():
             CREATE TABLE IF NOT EXISTS users (
                 user_id BIGINT PRIMARY KEY,
                 language_code VARCHAR(10) DEFAULT 'en',
-                frequency_seconds INTEGER DEFAULT 21600, -- Default 6 hours
-                tier VARCHAR(20) DEFAULT 'Free',
+                tier VARCHAR(50) DEFAULT 'Free',
+                frequency_seconds INTEGER DEFAULT 21600,
                 notification_sound_enabled BOOLEAN DEFAULT TRUE,
                 silent_mode_enabled BOOLEAN DEFAULT FALSE,
                 silent_mode_start_time TIME DEFAULT '23:00:00',
                 silent_mode_end_time TIME DEFAULT '07:00:00',
-                last_active TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                last_active_at TIMESTAMPTZ DEFAULT NOW(),
+                last_ad_sent_at TIMESTAMPTZ
             );
         ''')
-        log.info("Users table schema verified/updated.")
-
-        # User Addresses table
+        # Add columns if they don't exist for backward compatibility
+        await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS notification_sound_enabled BOOLEAN DEFAULT TRUE;")
+        await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS silent_mode_enabled BOOLEAN DEFAULT FALSE;")
+        await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS silent_mode_start_time TIME DEFAULT '23:00:00';")
+        await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS silent_mode_end_time TIME DEFAULT '07:00:00';")
+        await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_ad_sent_at TIMESTAMPTZ;")
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS user_addresses (
                 address_id SERIAL PRIMARY KEY,
-                user_id BIGINT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
-                region TEXT NOT NULL,
-                street TEXT NOT NULL,
-                full_address_text TEXT NOT NULL,
-                latitude DOUBLE PRECISION,
-                longitude DOUBLE PRECISION,
-                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-                UNIQUE (user_id, full_address_text)
+                user_id BIGINT REFERENCES users(user_id) ON DELETE CASCADE,
+                region VARCHAR(255),
+                street VARCHAR(255),
+                full_address_text TEXT,
+                latitude DECIMAL(9, 6),
+                longitude DECIMAL(9, 6),
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                UNIQUE(user_id, full_address_text) -- Ensure unique full addresses per user
             );
         ''')
-        log.info("User_addresses table schema verified/updated.")
 
-        # Outage Announcements table
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS outages (
-                raw_text_hash VARCHAR(64) PRIMARY KEY, -- SHA256 hash of raw text
-                source_type VARCHAR(50) NOT NULL, -- e.g., 'water', 'gas', 'electric'
+                outage_id SERIAL PRIMARY KEY,
+                raw_text_hash VARCHAR(64) UNIQUE NOT NULL,
+                source_type VARCHAR(50) NOT NULL,
                 source_url TEXT,
-                publication_date TIMESTAMP WITH TIME ZONE,
-                start_datetime TIMESTAMP WITH TIME ZONE,
-                end_datetime TIMESTAMP WITH TIME ZONE,
-                status VARCHAR(50), -- e.g., 'planned', 'emergency', 'resolved'
-                regions TEXT[], -- Array of affected regions
-                streets TEXT[], -- Array of affected streets
-                details JSONB, -- Store original Armenian text and any other extracted data
-                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+                publication_date TIMESTAMPTZ,
+                start_datetime TIMESTAMPTZ,
+                end_datetime TIMESTAMPTZ,
+                status VARCHAR(100),
+                regions TEXT[],
+                streets TEXT[],
+                details JSONB,
+                created_at TIMESTAMPTZ DEFAULT NOW()
             );
         ''')
-        log.info("Outages table schema verified/updated.")
-
-        # Notification Log table
+        
         await conn.execute('''
-            CREATE TABLE IF NOT EXISTS notification_log (
-                log_id SERIAL PRIMARY KEY,
-                user_id BIGINT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
-                outage_hash VARCHAR(64) NOT NULL REFERENCES outages(raw_text_hash) ON DELETE CASCADE,
-                notified_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-                UNIQUE (user_id, outage_hash)
+            CREATE TABLE IF NOT EXISTS sent_notifications (
+                user_id BIGINT NOT NULL,
+                outage_hash VARCHAR(64) NOT NULL,
+                sent_at TIMESTAMPTZ DEFAULT NOW(),
+                PRIMARY KEY (user_id, outage_hash)
             );
         ''')
-        log.info("Notification_log table schema verified/updated.")
 
-        # Bot Status table (for maintenance mode, last check time, etc.)
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS bot_status (
-                status_key VARCHAR(100) PRIMARY KEY,
+                status_key VARCHAR(255) PRIMARY KEY,
                 status_value TEXT,
-                updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+                updated_at TIMESTAMPTZ DEFAULT NOW()
             );
         ''')
-        log.info("Bot_status table schema verified/updated.")
+
         log.info("Database schema verified/updated.")
 
 # --- User Management ---
-async def create_or_update_user(user_id: int, language_code: str = 'en') -> dict:
-    if not pool: return {}
-    async with pool.acquire() as conn:
-        user = await conn.fetchrow(
-            '''
-            INSERT INTO users (user_id, language_code) VALUES ($1, $2)
-            ON CONFLICT (user_id) DO UPDATE SET language_code = $2, last_active = NOW()
-            RETURNING *;
-            ''',
-            user_id, language_code
-        )
-        return dict(user) if user else {}
-
-async def get_user(user_id: int) -> Optional[Dict[str, Any]]:
+async def get_user(user_id: int) -> Optional[asyncpg.Record]:
     if not pool: return None
     async with pool.acquire() as conn:
-        user = await conn.fetchrow("SELECT * FROM users WHERE user_id = $1", user_id)
-        return dict(user) if user else None
+        return await conn.fetchrow("SELECT * FROM users WHERE user_id = $1", user_id)
 
-async def get_all_users() -> List[Dict[str, Any]]:
-    """Fetches all users from the database."""
-    if not pool: return []
+async def create_or_update_user(user_id: int, language_code: str):
+    if not pool: return
     async with pool.acquire() as conn:
-        users = await conn.fetch("SELECT * FROM users")
-        return [dict(user) for user in users]
+        await conn.execute('''
+            INSERT INTO users (user_id, language_code, last_active_at)
+            VALUES ($1, $2, NOW())
+            ON CONFLICT (user_id) DO UPDATE SET last_active_at = NOW();
+        ''', user_id, language_code)
+    log.info(f"User {user_id} created or last_active_at updated.")
 
 async def update_user_language(user_id: int, language_code: str):
     if not pool: return
     async with pool.acquire() as conn:
-        await conn.execute("UPDATE users SET language_code = $1, last_active = NOW() WHERE user_id = $2", language_code, user_id)
+        await conn.execute("UPDATE users SET language_code = $1 WHERE user_id = $2", language_code, user_id)
 
 async def update_user_frequency(user_id: int, frequency_seconds: int):
     if not pool: return
     async with pool.acquire() as conn:
-        await conn.execute("UPDATE users SET frequency_seconds = $1, last_active = NOW() WHERE user_id = $2", frequency_seconds, user_id)
+        await conn.execute("UPDATE users SET frequency_seconds = $1 WHERE user_id = $2", frequency_seconds, user_id)
 
-async def update_user_last_active(user_id: int):
+async def update_user_sound_settings(user_id: int, settings: Dict[str, Any]):
+    """Updates various sound-related settings for a user."""
     if not pool: return
-    async with pool.acquire() as conn:
-        await conn.execute("UPDATE users SET last_active = NOW() WHERE user_id = $1", user_id)
+    
+    # Build the SET part of the query dynamically
+    set_clauses = []
+    values = []
+    i = 1
+    for key, value in settings.items():
+        set_clauses.append(f"{key} = ${i}")
+        values.append(value)
+        i += 1
+    
+    if not set_clauses:
+        return
 
-async def set_user_notification_sound(user_id: int, enabled: bool):
-    if not pool: return
+    values.append(user_id)
+    query = f"UPDATE users SET {', '.join(set_clauses)} WHERE user_id = ${i}"
+    
     async with pool.acquire() as conn:
-        await conn.execute("UPDATE users SET notification_sound_enabled = $1, last_active = NOW() WHERE user_id = $2", enabled, user_id)
+        await conn.execute(query, *values)
 
-async def set_user_silent_mode_enabled(user_id: int, enabled: bool):
-    if not pool: return
-    async with pool.acquire() as conn:
-        await conn.execute("UPDATE users SET silent_mode_enabled = $1, last_active = NOW() WHERE user_id = $2", enabled, user_id)
-
-async def set_user_silent_mode_times(user_id: int, start_time: datetime.time, end_time: datetime.time):
-    if not pool: return
-    async with pool.acquire() as conn:
-        await conn.execute(
-            "UPDATE users SET silent_mode_start_time = $1, silent_mode_end_time = $2, last_active = NOW() WHERE user_id = $3",
-            start_time,
-            end_time,
-            user_id
-        )
-# --- User Address Management ---
-async def add_user_address(user_id: int, region: str, street: str, full_address_text: str, latitude: float, longitude: float) -> Optional[int]:
-    if not pool: return None
-    async with pool.acquire() as conn:
-        try:
-            address_id = await conn.fetchval(
-                '''
+# --- Address Management ---
+async def add_user_address(user_id: int, region: str, street: str, full_address: str, lat: float, lon: float) -> bool:
+    if not pool: return False
+    try:
+        async with pool.acquire() as conn:
+            await conn.execute('''
                 INSERT INTO user_addresses (user_id, region, street, full_address_text, latitude, longitude)
                 VALUES ($1, $2, $3, $4, $5, $6)
-                ON CONFLICT (user_id, full_address_text) DO NOTHING
-                RETURNING address_id;
-                ''',
-                user_id, region, street, full_address_text, latitude, longitude
-            )
-            return address_id
-        except Exception as e:
-            log.error(f"Error adding user address {full_address_text} for user {user_id}: {e}", exc_info=True)
-            return None
+            ''', user_id, region, street, full_address, lat, lon)
+        return True
+    except asyncpg.UniqueViolationError:
+        log.warning(f"Attempted to add duplicate address for user {user_id}: {full_address}")
+        return False
 
-async def get_user_addresses(user_id: int) -> List[Dict[str, Any]]:
+async def get_user_addresses(user_id: int) -> List[asyncpg.Record]:
     if not pool: return []
     async with pool.acquire() as conn:
-        addresses = await conn.fetch("SELECT * FROM user_addresses WHERE user_id = $1 ORDER BY created_at", user_id)
-        return [dict(addr) for addr in addresses]
+        return await conn.fetch("SELECT * FROM user_addresses WHERE user_id = $1 ORDER BY created_at", user_id)
 
 async def remove_user_address(address_id: int, user_id: int) -> bool:
     if not pool: return False
     async with pool.acquire() as conn:
         result = await conn.execute("DELETE FROM user_addresses WHERE address_id = $1 AND user_id = $2", address_id, user_id)
-        return result == 'DELETE 1'
+        return 'DELETE 1' in result
 
-async def clear_all_user_addresses(user_id: int) -> bool:
-    if not pool: return False
+async def clear_all_user_addresses(user_id: int) -> int:
+    """Removes all addresses for a user and returns the count of deleted rows."""
+    if not pool: return 0
     async with pool.acquire() as conn:
         result = await conn.execute("DELETE FROM user_addresses WHERE user_id = $1", user_id)
-        # asyncpg returns 'DELETE N' where N is number of rows
-        return result.startswith('DELETE')
+        # 'DELETE 5' -> 5
+        return int(result.split(' ')[1]) if 'DELETE' in result else 0
 
-
-# --- Outage Management ---
+# --- Outage & Notification Management ---
 async def add_outage(outage_data: Dict[str, Any]):
     if not pool: return
-    async with pool.acquire() as conn:
-        await conn.execute(
-            '''
-            INSERT INTO outages (raw_text_hash, source_type, source_url, publication_date, start_datetime, end_datetime, status, regions, streets, details)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-            ON CONFLICT (raw_text_hash) DO UPDATE SET
-                source_type = EXCLUDED.source_type,
-                source_url = EXCLUDED.source_url,
-                publication_date = EXCLUDED.publication_date,
-                start_datetime = EXCLUDED.start_datetime,
-                end_datetime = EXCLUDED.end_datetime,
-                status = EXCLUDED.status,
-                regions = EXCLUDED.regions,
-                streets = EXCLUDED.streets,
-                details = EXCLUDED.details,
-                created_at = NOW(); -- Update timestamp on conflict as well
+    try:
+        async with pool.acquire() as conn:
+            # Using ON CONFLICT...DO NOTHING is cleaner than checking for existence first.
+            await conn.execute('''
+                INSERT INTO outages (raw_text_hash, source_type, source_url, publication_date, start_datetime, end_datetime, status, regions, streets, details)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                ON CONFLICT (raw_text_hash) DO NOTHING
             ''',
-            outage_data['raw_text_hash'],
-            outage_data['source_type'],
-            outage_data['source_url'],
-            outage_data['publication_date'],
-            outage_data['start_datetime'],
-            outage_data['end_datetime'],
-            outage_data['status'],
-            outage_data['regions'],
-            outage_data['streets'],
-            outage_data['details']
-        )
+            outage_data['raw_text_hash'], outage_data.get('source_type'),
+            outage_data.get('source_url'), outage_data.get('publication_date'),
+            outage_data.get('start_datetime'), outage_data.get('end_datetime'),
+            outage_data.get('status'), outage_data.get('regions'),
+            outage_data.get('streets'), outage_data.get('details')
+            )
+    except Exception as e:
+        log.error(f"Error adding outage to DB: {e}", exc_info=True)
 
-async def get_active_outages_for_address(full_address_text: str) -> List[Dict[str, Any]]:
-    """
-    Fetches active outages (where end_datetime is in the future or not specified)
-    for a given full address text.
-    Uses ILIKE for fuzzy matching on the Armenian text within details.
-    """
+async def find_outages_for_address(lat: float, lon: float, radius_meters: int = 500) -> List[asyncpg.Record]:
+    """Finds current and future outages near a specific coordinate point."""
     if not pool: return []
+
+    # This query would need PostGIS for accurate radius search.
+    # A simplified search based on text matching is more feasible without PostGIS.
+    # This function is a placeholder for the logic you'd implement.
+    # For now, we will do the matching in Python. Let's get all recent outages.
     async with pool.acquire() as conn:
-        # We look for outages that are either ongoing or upcoming
-        # An outage is considered active if:
-        # 1. its end_datetime is NULL (ongoing indefinitely)
-        # 2. OR its end_datetime is in the future
-        # AND its Armenian text details match the address (case-insensitive)
-        outages = await conn.fetch(
-            """
-            SELECT * FROM outages
-            WHERE (end_datetime IS NULL OR end_datetime > NOW())
-            AND details->>'armenian_text' ILIKE $1
-            ORDER BY start_datetime NULLS LAST; -- Order by start time, nulls at end
-            """,
-            f'%{full_address_text}%'
-        )
-        return [dict(o) for o in outages]
+        # Get outages that ended recently or are in the future
+        return await conn.fetch("SELECT * FROM outages WHERE end_datetime IS NULL OR end_datetime > NOW() - INTERVAL '1 day' ORDER BY start_datetime DESC")
 
-
-async def get_past_outages_for_address(full_address_text: str) -> Optional[Dict[str, Any]]:
-    """
-    Fetches the most recent past outage for a given full address text.
-    """
+async def get_last_outage_for_address(full_address_text: str) -> Optional[asyncpg.Record]:
+    """Finds the most recent past outage for a specific address text for historical lookups."""
+    # This is a complex query that requires text matching.
+    # A full-text search index on the details column would be ideal here.
     if not pool: return None
     async with pool.acquire() as conn:
-        past_outage = await conn.fetchrow(
+        # This is a simplified LIKE query.
+        return await conn.fetchrow(
             "SELECT * FROM outages WHERE details->>'armenian_text' ILIKE $1 AND end_datetime < NOW() ORDER BY end_datetime DESC LIMIT 1",
             f'%{full_address_text}%'
         )
-        return dict(past_outage) if past_outage else None
 
 # --- Bot Status & Analytics ---
 async def set_bot_status(key: str, value: str):
@@ -308,29 +262,6 @@ async def get_system_stats() -> Dict[str, int]:
         }
 
 async def get_user_notification_count(user_id: int) -> int:
-    """Gets the total number of notifications sent to a specific user."""
-    if not pool: return 0
-    async with pool.acquire() as conn:
-        return await conn.fetchval("SELECT COUNT(*) FROM notification_log WHERE user_id = $1", user_id)
-
-async def record_notification_sent(user_id: int, outage_hash: str):
-    """Records that a notification for a specific outage has been sent to a user."""
-    if not pool: return
-    async with pool.acquire() as conn:
-        await conn.execute(
-            '''
-            INSERT INTO notification_log (user_id, outage_hash) VALUES ($1, $2)
-            ON CONFLICT (user_id, outage_hash) DO NOTHING;
-            ''',
-            user_id, outage_hash
-        )
-
-async def has_notification_been_sent(user_id: int, outage_hash: str) -> bool:
-    """Checks if a notification for a specific outage has already been sent to a user."""
-    if not pool: return False
-    async with pool.acquire() as conn:
-        count = await conn.fetchval(
-            "SELECT COUNT(*) FROM notification_log WHERE user_id = $1 AND outage_hash = $2",
-            user_id, outage_hash
-        )
-        return count > 0
+     if not pool: return 0
+     async with pool.acquire() as conn:
+        return await conn.fetchval("SELECT COUNT(*) FROM sent_notifications WHERE user_id = $1", user_id)
