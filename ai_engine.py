@@ -32,7 +32,7 @@ def is_ai_available() -> bool:
 
 def translate_armenian_to_english(text: str) -> Optional[str]:
     """
-    Переводит армянский текст на английский через Hugging Face API.
+    Переводит армянский текст на английский через Hugging Face API (NLLB-200).
     """
     if not TRANSLATION_API_KEY:
         log.error("TRANSLATION_API_KEY is not set.")
@@ -41,11 +41,20 @@ def translate_armenian_to_english(text: str) -> Optional[str]:
         response = requests.post(
             f"https://api-inference.huggingface.co/models/{TRANSLATION_MODEL}",
             headers={"Authorization": f"Bearer {TRANSLATION_API_KEY}"},
-            json={"inputs": text}
+            json={
+                "inputs": text,
+                "parameters": {
+                    "src_lang": "arm",  # армянский
+                    "tgt_lang": "eng_Latn"  # английский (латиница)
+                }
+            }
         )
         response.raise_for_status()
         data = response.json()
-        if isinstance(data, list) and data and 'translation_text' in data[0]:
+        # NLLB-200 возвращает {'translation_text': '...'} или [{'translation_text': '...'}]
+        if isinstance(data, dict) and 'translation_text' in data:
+            return data['translation_text']
+        elif isinstance(data, list) and data and 'translation_text' in data[0]:
             return data[0]['translation_text']
         elif isinstance(data, dict) and 'error' in data:
             log.error(f"Translation API error: {data['error']}")
