@@ -52,6 +52,10 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
+if os.getenv("BOT_ENABLED", "false").lower() != "true":
+    print("Бот отключён переменной среды. Завершение работы.")
+    sys.exit(0)
+
 # --- Constants ---
 class UserSteps(Enum):
     NONE = auto()
