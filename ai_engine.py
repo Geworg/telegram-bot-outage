@@ -39,8 +39,8 @@ def translate_armenian_to_english(text: str) -> Optional[str]:
                 "inputs": text,
                 "parameters": {
                     # Для facebook/nllb-200-distilled-600M используем коды hye_Armn → eng_Latn
-                    "src_lang": "hye_Armn",  # армянский (армянский алфавит)
-                    "tgt_lang": "eng_Latn"   # английский (латиница)
+                    "src_lang": "hye_Armn", # армянский (армянский алфавит)
+                    "tgt_lang": "eng_Latn"  # английский (латиница)
                 }
             }
         )
