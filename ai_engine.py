@@ -6,15 +6,9 @@ from typing import List, Dict, Any, Optional
 log = logging.getLogger(__name__)
 
 TRANSLATION_API_KEY = os.getenv("TRANSLATION_API_KEY")
-TRANSLATION_MODEL = os.getenv("TRANSLATION_MODEL", "Helsinki-NLP/opus-mt-hy-en")
+TRANSLATION_MODEL = os.getenv("TRANSLATION_MODEL", "facebook/nllb-200-distilled-600M")
 NER_API_KEY = os.getenv("NER_API_KEY")
 NER_MODEL = os.getenv("NER_MODEL", "dslim/bert-base-NER")
-
-# --- Global Model Storage ---
-# Локальные пайплайны и torch больше не используются, теперь только API
-# translator_pipeline = None
-# ner_pipeline = None
-# models_loaded = False
 
 def load_models():
     """
@@ -44,8 +38,9 @@ def translate_armenian_to_english(text: str) -> Optional[str]:
             json={
                 "inputs": text,
                 "parameters": {
-                    "src_lang": "armn",  # армянский
-                    "tgt_lang": "eng_Latn"  # английский (латиница)
+                    # Для facebook/nllb-200-distilled-600M используем коды hye_Armn → eng_Latn
+                    "src_lang": "hye_Armn",  # армянский (армянский алфавит)
+                    "tgt_lang": "eng_Latn"   # английский (латиница)
                 }
             }
         )
