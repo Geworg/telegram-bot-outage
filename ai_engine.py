@@ -44,7 +44,7 @@ def translate_armenian_to_english(text: str) -> Optional[str]:
             json={
                 "inputs": text,
                 "parameters": {
-                    "src_lang": "arm",  # армянский
+                    "src_lang": "armn",  # армянский
                     "tgt_lang": "eng_Latn"  # английский (латиница)
                 }
             }
