@@ -1,10 +1,9 @@
+import logging
 import asyncio
 import httpx
 from bs4 import BeautifulSoup
-import logging
+from bs4.element import Tag
 from typing import List, Dict
-
-# New local imports
 from ai_engine import is_ai_available, translate_armenian_to_english, extract_entities_from_text
 from parsing_utils import get_text_hash, structure_ner_entities
 import db_manager
@@ -42,11 +41,12 @@ async def fetch_electric_announcements() -> List[Dict]:
 
             # 2. Scrape Emergency Outages (table)
             emergency_table = soup.find('table', id='ctl00_ContentPlaceHolder1_vtarayin')
-            if emergency_table:
-                rows = emergency_table.select('tbody tr')
+            if emergency_table and isinstance(emergency_table, Tag):
+                tbody = emergency_table.find('tbody') if isinstance(emergency_table, Tag) else None
+                rows = tbody.find_all('tr') if isinstance(tbody, Tag) else []
                 log.info(f"Found {len(rows)} rows in the emergency electricity outage table.")
                 for row in rows:
-                    cells = [cell.get_text(strip=True) for cell in row.find_all('td')]
+                    cells = [cell.get_text(strip=True) for cell in row.find_all('td')] if isinstance(row, Tag) else []
                     # Combine cells into a single line of text for the AI to process
                     row_text = " | ".join(filter(None, cells))
                     if row_text:

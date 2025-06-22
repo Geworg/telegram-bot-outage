@@ -1,9 +1,9 @@
-import hashlib
 import logging
+import pytz
+import hashlib
 import re
 from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional
-import pytz
 
 # Configure logger for this module
 log = logging.getLogger(__name__)
@@ -93,7 +93,10 @@ def structure_ner_entities(entities: List[Dict[str, Any]], original_english_text
         "persons": [],
         "misc": [],
         "locations": [],
-        "details": {} # For extra unstructured info
+        "details": {"english_text": original_english_text}, # For extra unstructured info
+        "start_datetime": None,
+        "end_datetime": None,
+        "status": "unknown"
     }
 
     for entity in entities:
@@ -131,8 +134,5 @@ def structure_ner_entities(entities: List[Dict[str, Any]], original_english_text
         structured_data['status'] = 'emergency'
     else:
         structured_data['status'] = 'unknown'
-
-    # Add the full text as a detail
-    structured_data['details']['english_text'] = original_english_text
 
     return structured_data

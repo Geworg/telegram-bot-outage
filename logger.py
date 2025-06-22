@@ -1,3 +1,4 @@
+from typing import Optional
 import logging
 
 logging.basicConfig(
@@ -9,7 +10,7 @@ logging.basicConfig(
 def log_info(msg: str):
     logging.info(msg)
 
-def log_error(msg: str, exc: Exception = None):
+def log_error(msg: str, exc: Optional[Exception] = None):
     if exc:
         logging.error(f"{msg} - {str(exc)}", exc_info=True)
     else:
