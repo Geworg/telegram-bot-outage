@@ -402,6 +402,8 @@ async def handle_language_selection(update: Update, context: ContextTypes.DEFAUL
         lang_code = 'hy'
     elif text and 'Русский' in text:
         lang_code = 'ru'
+    elif text and 'English' in text:
+        lang_code = 'en'
     user_data = getattr(context, 'user_data', None)
     if user_data is not None:
         user_data["lang"] = lang_code
@@ -409,6 +411,10 @@ async def handle_language_selection(update: Update, context: ContextTypes.DEFAUL
     user_id = getattr(user, 'id', None)
     if user_id is not None:
         await db_manager.update_user_language(user_id, lang_code)
+    # Обновить команды бота на выбранном языке
+    application = getattr(context, 'application', None)
+    if application:
+        await set_bot_commands(application, lang_code)
     await message.reply_text(
         get_text("language_set_success", lang_code),
         reply_markup=get_main_menu_keyboard(lang_code)
@@ -763,7 +769,9 @@ if __name__ == "__main__":
 
 # --- Handler for /language command ---
 async def language_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Команда для смены языка. Показывает пользователю выбор языков."""
+    """
+    Команда для смены языка. Показывает пользователю выбор языков.
+    """
     message = getattr(update, 'message', None)
     if message is None:
         return
@@ -777,13 +785,6 @@ async def language_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
     keyboard = ReplyKeyboardMarkup(buttons, resize_keyboard=True, one_time_keyboard=True)
     await message.reply_text(prompt, reply_markup=keyboard)
-    # Обновить команды бота на выбранном языке, если язык уже выбран
-    lang = get_user_lang(context)
-    application = context.application if hasattr(context, 'application') else None
-    if application:
-        await set_bot_commands(application, lang)
-    # Обновить главное меню
-    await message.reply_text(" ", reply_markup=get_main_menu_keyboard(lang))
 
 async def cancel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lang = get_user_lang(context)
