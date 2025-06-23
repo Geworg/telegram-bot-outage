@@ -1,7 +1,11 @@
 .env
 .venv
+*.env
+*.venv
 *.gguf
 *.bin
 *.pt
 *.pth
 bot.log
+bfg-*.jar
+tokens.txt
