@@ -31,9 +31,6 @@ async def update_user_language(user_id: int, language_code: str):
 async def update_user_frequency(user_id: int, frequency_seconds: int):
     pass
 
-async def update_user_sound_settings(user_id: int, settings: Dict[str, Any]):
-    pass
-
 async def add_user_address(user_id: int, region: str, street: str, full_address: str, lat: float, lon: float) -> bool:
     return False
 

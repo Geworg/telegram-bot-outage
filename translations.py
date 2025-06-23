@@ -26,6 +26,16 @@ translations["sound_btn"] = {"hy": "🎵 Ձայնի կարգավորումներ
 translations["qa_btn"] = {"hy": "💬 Հարց ու պատասխան", "ru": "💬 Вопрос-ответ", "en": "💬 Q&A"}
 translations["clear_addresses_btn"] = {"hy": "🗑️ Մաքրել բոլոր հասցեները", "ru": "🗑️ Очистить все адреса", "en": "🗑️ Clear All Addresses"}
 
+# --- Command Descriptions ---
+translations["cmd_start"] = {"hy": "Սկսել/Մենյու", "ru": "Старт/Меню", "en": "Start/Menu"}
+translations["cmd_myaddresses"] = {"hy": "Իմ հասցեները", "ru": "Мои адреса", "en": "My addresses"}
+translations["cmd_clearaddresses"] = {"hy": "Մաքրել բոլոր հասցեները", "ru": "Очистить все адреса", "en": "Clear all addresses"}
+translations["cmd_sound"] = {"hy": "Ձայնի կարգավորումներ", "ru": "Настройки звука", "en": "Sound settings"}
+translations["cmd_frequency"] = {"hy": "Ստուգման հաճախականություն", "ru": "Частота проверок", "en": "Check frequency"}
+translations["cmd_qa"] = {"hy": "Հարց ու պատասխան", "ru": "Вопрос-ответ", "en": "Q&A and Support"}
+translations["cmd_stats"] = {"hy": "Վիճակագրություն", "ru": "Статистика", "en": "Statistics"}
+translations["cmd_language"] = {"hy": "Փոխել լեզուն", "ru": "Сменить язык", "en": "Change language"}
+
 # --- General UI ---
 translations["cancel"] = {"hy": "⛔ Չեղարկել", "ru": "⛔ Отменить", "en": "⛔ Cancel"}
 translations["yes"] = {"hy": "✅ Այո", "ru": "✅ Да", "en": "✅ Yes"}
@@ -112,6 +122,6 @@ translations["admin_unauthorized"] = {"hy": "Դուք իրավասու չեք ա
 translations["maintenance_on_feedback"] = {"hy": "⚙️ Սպասարկման ռեժիմը միացված է։", "ru": "⚙️ Режим обслуживания включен.", "en": "⚙️ Maintenance mode is ON."}
 translations["maintenance_off_feedback"] = {"hy": "✅ Սպասարկման ռեժիմը անջատված է։", "ru": "✅ Режим обслуживания выключен.", "en": "✅ Maintenance mode is OFF."}
 translations["maintenance_user_notification"] = {"hy": "⚙️ Բոտը ժամանակավորապես սպասարկման մեջ է։ Խնդրում ենք փորձել մի փոքր ուշ։", "ru": "⚙️ Бот временно находится на техобслуживании. Пожалуйста, попробуйте позже.", "en": "⚙️ The bot is temporarily under maintenance. Please try again later."}
-translations["support_message_from_user"] = {"hy": "✉️ *Նոր հաղորդագրություն սպասարկման կենտրոնին*\n\n*Ում կողմից*․ {user_mention}\n*Օգտատիրոջ ID*․ `{user_id}`\n*Հաղորդագրություն*․ {message}", "ru": "✉️ *Новое сообщение в поддержку*\n\n*От кого:* {user_mention}\n*ID пользователя:* `{user_id}`\n*Сообщение:*\n\n{message}", "en": "✉️ *New Support Message*\n\n*From whom:* {user_mention}\n*User ID:* `{user_id}`\n*Message:*\n\n{message}"}
+translations["support_message_from_user"] = {"hy": "✉️ *Նոր հաղորդագրություն սպասարկման կենտրոնին*\n\n*Ում կողմից*․ {user_mention}\n*Telegram-անուն*․ {user_username}\n*Օգտատիրոջ ID*․ `{user_id}`\n*Հաղորդագրություն*․ {message}", "ru": "✉️ *Новое сообщение в поддержку*\n\n*От кого*: {user_mention}\n*Telegram-ник*: {user_username}\n*ID пользователя*: `{user_id}`\n*Сообщение*:\n\n{message}", "en": "✉️ *New Support Message*\n\n*From whom*: {user_mention}\n*Telegram username*: {user_username}\n*User ID*: `{user_id}`\n*Message*:\n\n{message}"}
 translations["confirm_silent_mode_period"] = {"hy": "Ցանկանու՞մ եք լուռ ռեժիմը սահմանել {start} - {end} ժամանակահատվածի համար:", "ru": "Вы хотите установить тихий режим с {start} до {end}?", "en": "Would you like to set silent mode from {start} to {end}?"}
 translations["no_edit"] = {"hy": "📝 Խմբագրել", "ru": "📝 Изменить", "en": "📝 Edit"}
