@@ -764,9 +764,6 @@ def main():
     log.info("Starting bot polling...")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
-if __name__ == "__main__":
-    main()
-
 # --- Handler for /language command ---
 async def language_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
@@ -791,3 +788,6 @@ async def cancel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = getattr(update, 'message', None)
     if message is not None and hasattr(message, 'reply_text'):
         await message.reply_text(get_text("action_cancelled", lang), reply_markup=get_main_menu_keyboard(lang))
+
+if __name__ == "__main__":
+    main()
