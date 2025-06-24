@@ -3,8 +3,6 @@ import httpx
 from bs4 import BeautifulSoup
 import logging
 from typing import List
-
-# New local imports
 from ai_engine import is_ai_available, translate_armenian_to_english, extract_entities_from_text
 from parsing_utils import get_text_hash, structure_ner_entities
 import db_manager
@@ -52,27 +50,23 @@ async def process_and_store_announcement(announcement: dict):
     raw_armenian_text = announcement['text']
     source_url = announcement['url']
     
-    # 1. Translate
     english_text = translate_armenian_to_english(raw_armenian_text)
     if not english_text:
         log.warning("Translation failed for a water announcement.")
         return
 
-    # 2. Extract Entities
     entities = extract_entities_from_text(english_text)
     if not entities:
         log.info("No entities found in translated water announcement.")
         return
 
-    # 3. Structure Data
     structured_data = structure_ner_entities(entities, english_text)
 
-    # 4. Finalize and Store in DB
     final_outage_data = {
         "raw_text_hash": get_text_hash(raw_armenian_text),
         "source_type": "water",
         "source_url": source_url,
-        "publication_date": None,  # The model should extract this, can be improved
+        "publication_date": None,
         "start_datetime": structured_data.get('start_datetime'),
         "end_datetime": structured_data.get('end_datetime'),
         "status": structured_data.get('status', 'unknown'),
@@ -81,7 +75,6 @@ async def process_and_store_announcement(announcement: dict):
         "details": structured_data.get('details', {})
     }
     
-    # Add original armenian text to details
     final_outage_data['details']['armenian_text'] = raw_armenian_text
 
     await db_manager.add_outage(final_outage_data)
@@ -101,10 +94,7 @@ async def parse_all_water_announcements_async():
         log.info("No new water announcements to process.")
         return
     
-    # Process all announcements concurrently
     tasks = [process_and_store_announcement(ann) for ann in raw_announcements]
     await asyncio.gather(*tasks)
     
     log.info("Finished water announcement parsing cycle.")
-
-# <3

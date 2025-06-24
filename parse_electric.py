@@ -25,7 +25,6 @@ async def fetch_electric_announcements() -> List[Dict]:
             response.raise_for_status()
             soup = BeautifulSoup(response.text, 'html.parser')
 
-            # 1. Scrape Planned Outages (text block)
             planned_span = soup.find('span', id='ctl00_ContentPlaceHolder1_attenbody')
             if planned_span:
                 planned_text = planned_span.get_text(separator='\n', strip=True)
@@ -39,7 +38,6 @@ async def fetch_electric_announcements() -> List[Dict]:
             else:
                 log.warning("Planned electricity outage span not found.")
 
-            # 2. Scrape Emergency Outages (table)
             emergency_table = soup.find('table', id='ctl00_ContentPlaceHolder1_vtarayin')
             if emergency_table and isinstance(emergency_table, Tag):
                 tbody = emergency_table.find('tbody') if isinstance(emergency_table, Tag) else None
@@ -47,7 +45,6 @@ async def fetch_electric_announcements() -> List[Dict]:
                 log.info(f"Found {len(rows)} rows in the emergency electricity outage table.")
                 for row in rows:
                     cells = [cell.get_text(strip=True) for cell in row.find_all('td')] if isinstance(row, Tag) else []
-                    # Combine cells into a single line of text for the AI to process
                     row_text = " | ".join(filter(None, cells))
                     if row_text:
                         announcements.append({
@@ -126,5 +123,3 @@ async def parse_all_electric_announcements_async():
     await asyncio.gather(*tasks)
     
     log.info("Finished electric announcement parsing cycle.")
-
-# <3

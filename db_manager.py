@@ -41,26 +41,19 @@ async def setup_schema():
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS users (
                 user_id BIGINT PRIMARY KEY,
-                nick VARCHAR(64) DEFAULT 'none',
+                nick VARCHAR(64) DEFAULT '',
                 name VARCHAR(255) DEFAULT '',
                 language_code VARCHAR(10) DEFAULT 'en',
                 tier VARCHAR(50) DEFAULT 'Free',
                 frequency_seconds INTEGER DEFAULT 21600,
-                notification_sound_enabled BOOLEAN DEFAULT TRUE,
-                silent_mode_enabled BOOLEAN DEFAULT FALSE,
-                silent_mode_start_time TIME DEFAULT '23:00:00',
-                silent_mode_end_time TIME DEFAULT '07:00:00',
                 created_at TIMESTAMPTZ DEFAULT NOW(),
                 last_active_at TIMESTAMPTZ DEFAULT NOW(),
                 last_ad_sent_at TIMESTAMPTZ
             );
         ''')
-        await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS nick VARCHAR(64) DEFAULT 'none';")
+        await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS nick VARCHAR(64) DEFAULT '';")
         await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS name VARCHAR(255) DEFAULT ''; ")
         await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS notification_sound_enabled BOOLEAN DEFAULT TRUE;")
-        await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS silent_mode_enabled BOOLEAN DEFAULT FALSE;")
-        await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS silent_mode_start_time TIME DEFAULT '23:00:00';")
-        await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS silent_mode_end_time TIME DEFAULT '07:00:00';")
         await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_ad_sent_at TIMESTAMPTZ;")
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS user_addresses (
@@ -259,7 +252,6 @@ async def find_outages_for_address_text(address_text: str):
     if not pool:
         return []
     async with pool.acquire() as conn:
-        # Поиск по armenian_text, streets и regions (строгое и частичное совпадение)
         return await conn.fetch('''
             SELECT * FROM outages
             WHERE 

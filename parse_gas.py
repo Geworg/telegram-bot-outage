@@ -3,16 +3,14 @@ import httpx
 from bs4 import BeautifulSoup
 import logging
 from typing import List, Dict
-
-# New local imports
 from ai_engine import is_ai_available, translate_armenian_to_english, extract_entities_from_text
 from parsing_utils import get_text_hash, structure_ner_entities
 import db_manager
 
 log = logging.getLogger(__name__)
 
-GAS_URL_VTAR = "https://armenia-am.gazprom.com/notice/announcement/vtar/"  # Emergency
-GAS_URL_PLAN = "https://armenia-am.gazprom.com/notice/announcement/plan/"  # Planned
+GAS_URL_VTAR = "https://armenia-am.gazprom.com/notice/announcement/vtar/" # Emergency
+GAS_URL_PLAN = "https://armenia-am.gazprom.com/notice/announcement/plan/" # Planned
 
 async def fetch_gas_announcements() -> List[Dict]:
     """
@@ -33,7 +31,6 @@ async def fetch_gas_announcements() -> List[Dict]:
                 response.raise_for_status()
                 soup = BeautifulSoup(response.text, 'html.parser')
                 
-                # The main content is usually in 'div.page_text_cont'
                 content_div = soup.select_one('div.page_text_cont')
                 if content_div:
                     text_content = content_div.get_text(separator='\n', strip=True)
@@ -76,7 +73,6 @@ async def process_and_store_gas_announcement(announcement: dict):
 
     structured_data = structure_ner_entities(entities, english_text)
 
-    # If AI couldn't determine status, use the one inferred from the URL
     if structured_data.get('status', 'unknown') == 'unknown':
         structured_data['status'] = inferred_type
 
@@ -116,5 +112,3 @@ async def parse_all_gas_announcements_async():
     await asyncio.gather(*tasks)
     
     log.info("Finished gas announcement parsing cycle.")
-
-# <3

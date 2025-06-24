@@ -52,7 +52,6 @@ async def get_verified_address_from_yandex(address_text: str, lang: str = "ru_RU
 
             address_parts = {comp.get('kind'): comp.get('name') for comp in components}
 
-            # Construct a reliable street name
             street_name = address_parts.get('street', '')
             house_number = address_parts.get('house', '')
             full_street = f"{street_name}, {house_number}" if street_name and house_number else street_name

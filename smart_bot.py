@@ -151,7 +151,7 @@ def get_main_menu_keyboard(lang: str) -> ReplyKeyboardMarkup:
     buttons = [
         [KeyboardButton(get_text("add_address_btn", lang)), KeyboardButton(get_text("remove_address_btn", lang))],
         [KeyboardButton(get_text("my_addresses_btn", lang)), KeyboardButton(get_text("clear_addresses_btn", lang))],
-        [KeyboardButton(get_text("frequency_btn", lang)), KeyboardButton(get_text("qa_btn", lang))],  # Удалена кнопка статистики
+        [KeyboardButton(get_text("frequency_btn", lang)), KeyboardButton(get_text("qa_btn", lang))],
     ]
     return ReplyKeyboardMarkup(buttons, resize_keyboard=True)
 
@@ -192,7 +192,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         safe_set_user_data(user_data, "lang", lang)
         safe_set_user_data(user_data, "step", UserSteps.NONE.name)
         if application:
-            await set_bot_commands(application, lang, user_id=user_id)
+            await update_user_commands_menu(application, lang, user_id)
         result = safe_call(message, 'reply_text', get_text("menu_message", lang), reply_markup=get_main_menu_keyboard(lang))
         if inspect.isawaitable(result):
             await result
@@ -428,7 +428,6 @@ async def qa_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         keyboard = InlineKeyboardMarkup(buttons)
         await query.edit_message_text(answer_text, reply_markup=keyboard)
     elif data.startswith("faq_page_"):
-        # faq_page_{page}
         page = int(data.split('_')[2])
         await send_faq_page(query, context, page, lang)
     elif data.startswith("faq_prev_"):
@@ -453,14 +452,20 @@ async def qa_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
 # --- Helper for /language command ---
 async def language_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    Команда для смены языка. Показывает пользователю выбор языков.
+    Команда для смены языка. Показывает пользователю выбор языков и обновляет меню команд.
     """
     message = getattr(update, 'message', None)
+    user = getattr(update, 'effective_user', None)
+    user_id = getattr(user, 'id', None)
+    application = getattr(context, 'application', None)
+    lang = get_user_lang(context)
+    if application and user_id is not None:
+        await update_user_commands_menu(application, lang, user_id)
     if message is None:
         return
     user_data = getattr(context, 'user_data', None)
     safe_set_user_data(user_data, "step", UserSteps.AWAITING_INITIAL_LANG.name)
-    prompt = get_text("change_language_prompt", get_user_lang(context))
+    prompt = get_text("change_language_prompt", lang)
     buttons = [
         [KeyboardButton("\U0001F1E6\U0001F1F2 Հայերեն")],
         [KeyboardButton("\U0001F1F7\U0001F1FA Русский")],
@@ -498,17 +503,10 @@ async def handle_language_selection(update: Update, context: ContextTypes.DEFAUL
     if user_id is not None:
         await db_manager.update_user_language(user_id, lang_code)
     application = getattr(context, 'application', None)
-    if application and user_id:
-        await set_bot_commands(application, lang_code, user_id=user_id)
-    if user_data is not None:
-        user_data["lang"] = lang_code
-        user_data["step"] = UserSteps.NONE.name
-    await message.reply_text(
-        get_text("language_set_success", lang_code),
-        reply_markup=get_main_menu_keyboard(lang_code)
-    )
-    if user_data is not None:
-        user_data["step"] = UserSteps.NONE.name
+    if application and user_id is not None:
+        await update_user_commands_menu(application, lang_code, user_id)
+    safe_set_user_data(user_data, "step", UserSteps.NONE.name)
+    await message.reply_text(get_text("language_set_success", lang_code), reply_markup=get_main_menu_keyboard(lang_code))
 
 async def handle_region_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = getattr(update, 'message', None)
@@ -717,6 +715,26 @@ async def set_bot_commands(application: Application, lang: str, user_id: Optiona
     else:
         await application.bot.set_my_commands(commands, language_code=lang)
 
+async def update_user_commands_menu(application: Application, lang: str, user_id: int):
+    """
+    Обновляет меню команд Telegram только для одного пользователя на выбранном языке.
+    """
+    commands = [
+        BotCommand("start", get_text("cmd_start", lang)),
+        BotCommand("myaddresses", get_text("cmd_myaddresses", lang)),
+        BotCommand("language", get_text("cmd_language", lang)),
+        BotCommand("stats", get_text("cmd_stats", lang)),
+        BotCommand("clearaddresses", get_text("cmd_clearaddresses", lang)),
+        BotCommand("frequency", get_text("cmd_frequency", lang)),
+        BotCommand("qa", get_text("cmd_qa", lang)),
+    ]
+    from telegram import BotCommandScopeChat
+    await application.bot.set_my_commands(
+        commands,
+        language_code=lang,
+        scope=BotCommandScopeChat(chat_id=user_id)
+    )
+
 async def post_init(application: Application):
     await db_manager.init_db_pool()
     ai_engine.load_models()
@@ -745,6 +763,7 @@ def main():
         "clearaddresses": clear_addresses_command, "qa": qa_command,
         "language": language_command
     }
+    
     for command, handler in command_handlers.items():
         application.add_handler(CommandHandler(command, handler))
     
@@ -765,22 +784,46 @@ def main():
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lang = get_user_lang(context)
     message = getattr(update, 'message', None)
-    user = getattr(update, 'effective_user', None)
-    application = getattr(context, 'application', None)
-    if user is not None:
-        user_id = getattr(user, 'id', None)
-        user_nick = getattr(user, 'username', 'none') or 'none'
-        user_name = (getattr(user, 'first_name', '') or '') + (' ' + getattr(user, 'last_name', '') if getattr(user, 'last_name', '') else '')
-        user_name = user_name.strip()
-        user_lang_code = getattr(user, 'language_code', 'en')
-        if user_id is not None:
-            await db_manager.create_or_update_user(user_id, user_lang_code, user_nick, user_name)
-            if application:
-                await set_bot_commands(application, lang, user_id=user_id)
-    if message is not None:
-        await message.reply_text(get_text("unknown_command", lang))
+    user_data = getattr(context, 'user_data', None)
+    text = getattr(message, 'text', None) if message else None
 
-# Вставляем заглушку clear_addresses_callback, если она отсутствует
+    step = safe_get_user_data(user_data, "step", UserSteps.NONE.name)
+    if step == UserSteps.AWAITING_INITIAL_LANG.name:
+        await handle_language_selection(update, context)
+        return
+    elif step == UserSteps.AWAITING_REGION.name:
+        await handle_region_selection(update, context)
+        return
+    elif step == UserSteps.AWAITING_STREET.name:
+        await handle_street_input(update, context)
+        return
+    elif step == UserSteps.AWAITING_FREQUENCY.name:
+        await handle_frequency_selection(update, context)
+        return
+    elif step == UserSteps.AWAITING_SUPPORT_MESSAGE.name:
+        await handle_support_message(update, context)
+        return
+
+    if text == get_text("add_address_btn", lang):
+        await add_address_command(update, context)
+    elif text == get_text("remove_address_btn", lang):
+        await remove_address_command(update, context)
+    elif text == get_text("my_addresses_btn", lang):
+        await my_addresses_command(update, context)
+    elif text == get_text("frequency_btn", lang):
+        await frequency_command(update, context)
+    elif text == get_text("qa_btn", lang):
+        await qa_command(update, context)
+    elif text == get_text("clear_addresses_btn", lang):
+        await clear_addresses_command(update, context)
+    elif text == get_text("cancel", lang):
+        safe_set_user_data(user_data, "step", UserSteps.NONE.name)
+        if message is not None:
+            await message.reply_text(get_text("action_cancelled", lang), reply_markup=get_main_menu_keyboard(lang))
+    else:
+        if message is not None:
+            await message.reply_text(get_text("unknown_command", lang))
+
 async def clear_addresses_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lang = get_user_lang(context)
     query = getattr(update, 'callback_query', None)
@@ -789,4 +832,3 @@ async def clear_addresses_callback(update: Update, context: ContextTypes.DEFAULT
 
 if __name__ == "__main__":
     main()
-    

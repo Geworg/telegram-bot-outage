@@ -2,13 +2,10 @@ import os
 import logging
 import requests
 from typing import List, Dict, Any, Optional
-
-# Новый импорт для deep-translator
 from deep_translator import GoogleTranslator
 
 log = logging.getLogger(__name__)
 
-# Удалены переменные, связанные с Hugging Face Translation API
 NER_API_KEY = os.getenv("NER_API_KEY")
 NER_MODEL = os.getenv("NER_MODEL", "dslim/bert-base-NER")
 
