@@ -15,6 +15,8 @@ from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 from telegram import (
     Update,
+    BotCommand,
+    BotCommandScopeChat,
     KeyboardButton,
     ReplyKeyboardMarkup,
     ReplyKeyboardRemove,
@@ -481,7 +483,6 @@ async def qa_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         parts = data.split('_')
         q_idx = int(parts[2])
         page = int(parts[3])
-        # Получаем правильный ключ вопроса и ответа
         q_key = FAQ_QUESTION_KEYS[page * FAQ_PAGE_SIZE + q_idx]
         a_key = FAQ_ANSWER_KEYS[page * FAQ_PAGE_SIZE + q_idx]
         answer_text = get_text(a_key, lang)
@@ -569,7 +570,6 @@ async def handle_check_address_input(update: Update, context: ContextTypes.DEFAU
     from api_clients import get_verified_address_from_yandex
     result = await get_verified_address_from_yandex(text, lang="ru_RU" if lang == "ru" else ("en_US" if lang == "en" else "hy_AM"))
     if result:
-        # Проверка отключений по адресу
         from db_manager import find_outages_for_address_text
         outages = await find_outages_for_address_text(result['full_address'])
         if outages:
@@ -596,29 +596,39 @@ async def handle_check_address_input(update: Update, context: ContextTypes.DEFAU
 # --- State Logic Handlers ---
 @typing_indicator_for_all
 async def handle_language_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    message = getattr(update, 'message', None)
-    if message is None:
+    message = update.message
+    if not message:
         return
-    text = message.text
-    lang_code = 'en'
-    if text and 'Հայերեն' in text:
-        lang_code = 'hy'
-    elif text and 'Русский' in text:
-        lang_code = 'ru'
-    elif text and 'English' in text:
-        lang_code = 'en'
-    user_data = getattr(context, 'user_data', None)
-    if user_data is not None:
-        user_data["lang"] = lang_code
-    user = getattr(update, 'effective_user', None)
-    user_id = getattr(user, 'id', None)
-    if user_id is not None:
-        await db_manager.update_user_language(user_id, lang_code)
-    application = getattr(context, 'application', None)
-    if application and user_id is not None:
-        await update_user_commands_menu(application, lang_code, user_id)
-    safe_set_user_data(user_data, "step", UserSteps.NONE.name)
-    await message.reply_text(get_text("language_set_success", lang_code), reply_markup=get_main_menu_keyboard(lang_code))
+
+    text = getattr(message, 'text', None)
+    if not text:
+        return
+
+    if "Հայերեն" in text:
+        lang = "hy"
+    elif "Русский" in text:
+        lang = "ru"
+    elif "English" in text:
+        lang = "en"
+    else:
+        lang = "en"
+
+    user = update.effective_user
+    if user is None:
+        return
+    user_id = user.id
+    if context.user_data is not None:
+        context.user_data["lang"] = lang
+    await db_manager.update_user_language(user_id, lang)
+
+    await update_user_commands_menu(context.application, lang, user_id)
+
+    await message.reply_text(
+        get_text("language_set_success", lang),
+        reply_markup=get_main_menu_keyboard(lang)
+    )
+    if context.user_data is not None:
+        context.user_data["step"] = UserSteps.NONE.name
 
 @typing_indicator_for_all
 async def handle_region_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -846,9 +856,8 @@ async def update_user_commands_menu(application: Application, lang: str, user_id
         BotCommand("frequency", get_text("cmd_frequency", lang)),
         BotCommand("qa", get_text("cmd_qa", lang)),
     ]
-    from telegram import BotCommandScopeChat
     await application.bot.set_my_commands(
-        commands,
+        commands=commands,
         language_code=lang,
         scope=BotCommandScopeChat(chat_id=user_id)
     )
