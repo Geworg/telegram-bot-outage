@@ -5,9 +5,11 @@ import os
 import re
 import sys
 import inspect
+import time
 from enum import Enum, auto
 from datetime import datetime, time as dt_time
 from typing import Dict, List, Optional, Callable
+from contextlib import asynccontextmanager
 
 # --- Third-party Libraries ---
 from dotenv import load_dotenv
@@ -111,7 +113,30 @@ async def send_typing_periodically(context: ContextTypes.DEFAULT_TYPE, chat_id: 
     except asyncio.CancelledError:
         pass
 
-# --- Вспомогательные безопасные функции ---
+@asynccontextmanager
+async def send_typing_if_slow(context, chat_id):
+    task = None
+    is_sent = False
+    async def typing():
+        nonlocal is_sent
+        await asyncio.sleep(1)
+        is_sent = True
+        try:
+            await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+        except Exception:
+            pass
+    try:
+        task = asyncio.create_task(typing())
+        yield
+    finally:
+        if task:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+# --- Auxiliary security functions ---
 def safe_set_user_data(user_data, key, value):
     if user_data is not None and hasattr(user_data, '__setitem__'):
         user_data[key] = value
@@ -152,10 +177,28 @@ def get_main_menu_keyboard(lang: str) -> ReplyKeyboardMarkup:
         [KeyboardButton(get_text("add_address_btn", lang)), KeyboardButton(get_text("remove_address_btn", lang))],
         [KeyboardButton(get_text("my_addresses_btn", lang)), KeyboardButton(get_text("clear_addresses_btn", lang))],
         [KeyboardButton(get_text("frequency_btn", lang)), KeyboardButton(get_text("qa_btn", lang))],
+        [KeyboardButton(get_text("check_address_btn", lang))],
     ]
     return ReplyKeyboardMarkup(buttons, resize_keyboard=True)
 
 # --- Command & Button Handlers ---
+def typing_indicator_for_all(func):
+    async def wrapper(update, context, *args, **kwargs):
+        chat_id = None
+        if hasattr(update, 'effective_chat') and getattr(update, 'effective_chat', None):
+            chat_id = update.effective_chat.id
+        elif hasattr(update, 'message') and getattr(update, 'message', None):
+            chat_id = update.message.chat_id
+        elif hasattr(update, 'callback_query') and getattr(update, 'callback_query', None):
+            chat_id = update.callback_query.message.chat_id if update.callback_query.message else None
+        if chat_id is not None:
+            async with send_typing_if_slow(context, chat_id):
+                return await func(update, context, *args, **kwargs)
+        else:
+            return await func(update, context, *args, **kwargs)
+    return wrapper
+
+@typing_indicator_for_all
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = safe_get(update, 'effective_user')
     message = safe_get(update, 'message')
@@ -180,9 +223,10 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [KeyboardButton("\U0001F1EC\U0001F1E7 English" + (" (continue)" if user_lang_code == 'en' else ""))]
         ]
         keyboard = ReplyKeyboardMarkup(buttons, resize_keyboard=True, one_time_keyboard=True)
-        result = safe_call(message, 'reply_text', prompt, reply_markup=keyboard)
-        if inspect.isawaitable(result):
-            await result
+        async with send_typing_if_slow(context, message.chat_id):
+            result = safe_call(message, 'reply_text', prompt, reply_markup=keyboard)
+            if inspect.isawaitable(result):
+                await result
         await db_manager.create_or_update_user(user_id, user_lang_code, user_nick, user_name)
         safe_set_user_data(user_data, "lang", user_lang_code)
     else:
@@ -193,11 +237,13 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         safe_set_user_data(user_data, "step", UserSteps.NONE.name)
         if application:
             await update_user_commands_menu(application, lang, user_id)
-        result = safe_call(message, 'reply_text', get_text("menu_message", lang), reply_markup=get_main_menu_keyboard(lang))
-        if inspect.isawaitable(result):
-            await result
+        async with send_typing_if_slow(context, message.chat_id):
+            result = safe_call(message, 'reply_text', get_text("menu_message", lang), reply_markup=get_main_menu_keyboard(lang))
+            if inspect.isawaitable(result):
+                await result
     await db_manager.create_or_update_user(user_id, safe_get(user, 'language_code', 'en'), user_nick, user_name)
 
+@typing_indicator_for_all
 async def add_address_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lang = get_user_lang(context)
     safe_set_user_data(getattr(context, 'user_data', None), "step", UserSteps.AWAITING_REGION.name)
@@ -209,6 +255,7 @@ async def add_address_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     if message is not None and hasattr(message, 'reply_text'):
         await message.reply_text(get_text("choose_region", lang), reply_markup=keyboard)
 
+@typing_indicator_for_all
 async def remove_address_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = getattr(update, 'effective_user', None)
     message = getattr(update, 'message', None)
@@ -227,6 +274,7 @@ async def remove_address_command(update: Update, context: ContextTypes.DEFAULT_T
     if message is not None:
         await message.reply_text(get_text("select_address_to_remove", lang), reply_markup=keyboard)
 
+@typing_indicator_for_all
 async def my_addresses_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = getattr(update, 'effective_user', None)
     message = getattr(update, 'message', None)
@@ -247,6 +295,7 @@ async def my_addresses_command(update: Update, context: ContextTypes.DEFAULT_TYP
     if message is not None:
         await message.reply_text(response_text, parse_mode=ParseMode.MARKDOWN_V2)
 
+@typing_indicator_for_all
 async def frequency_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = getattr(update, 'effective_user', None)
     message = getattr(update, 'message', None)
@@ -273,6 +322,7 @@ async def frequency_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await message.reply_text(f"{current_freq_text}\n\n{get_text('frequency_prompt', lang)}", reply_markup=keyboard)
     safe_set_user_data(getattr(context, 'user_data', None), "step", UserSteps.AWAITING_FREQUENCY.name)
 
+@typing_indicator_for_all
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = getattr(update, 'effective_user', None)
     message = getattr(update, 'message', None)
@@ -286,6 +336,7 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_notif_count = await db_manager.get_user_notification_count(user_id)
     await message.reply_text(get_text("stats_message", lang, **system_stats, user_notifications=user_notif_count), parse_mode=ParseMode.MARKDOWN_V2)
 
+@typing_indicator_for_all
 async def clear_addresses_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lang = get_user_lang(context)
     user = getattr(update, 'effective_user', None)
@@ -304,6 +355,7 @@ async def clear_addresses_command(update: Update, context: ContextTypes.DEFAULT_
     keyboard = InlineKeyboardMarkup(buttons)
     await message.reply_text(get_text("clear_addresses_prompt", lang), reply_markup=keyboard)
 
+@typing_indicator_for_all
 async def qa_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lang = get_user_lang(context)
     page = 0
@@ -312,17 +364,20 @@ async def qa_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_data['faq_page'] = page
     await send_faq_page(update, context, page, lang)
 
+@typing_indicator_for_all
 async def send_faq_page(update_or_query, context, page, lang):
     start = page * FAQ_PAGE_SIZE
     end = start + FAQ_PAGE_SIZE
     question_keys = FAQ_QUESTION_KEYS[start:end]
-    buttons = [[InlineKeyboardButton(get_text(qk, lang), callback_data=f"faq_q_{i+1}_{page}")]
-               for i, qk in enumerate(question_keys, start=start)]
+    buttons = [[InlineKeyboardButton(get_text(qk, lang), callback_data=f"faq_q_{i}_{page}")
+                ] for i, qk in enumerate(question_keys, start=0)]
     nav_buttons = []
+    prev_text = get_text("faq_prev_btn", lang) if "faq_prev_btn" in translations else {"ru": "⏮ Назад", "en": "⏮ Back", "hy": "⏮ Հետ"}[lang]
+    next_text = get_text("faq_next_btn", lang) if "faq_next_btn" in translations else {"ru": "⏭ Вперёд", "en": "⏭ Next", "hy": "⏭ Առաջ"}[lang]
     if page > 0:
-        nav_buttons.append(InlineKeyboardButton("⏮ Назад", callback_data=f"faq_prev_{page}"))
+        nav_buttons.append(InlineKeyboardButton(prev_text, callback_data=f"faq_prev_{page}"))
     if end < len(FAQ_QUESTION_KEYS):
-        nav_buttons.append(InlineKeyboardButton("⏭ Вперёд", callback_data=f"faq_next_{page}"))
+        nav_buttons.append(InlineKeyboardButton(next_text, callback_data=f"faq_next_{page}"))
     if nav_buttons:
         buttons.append(nav_buttons)
     buttons.append([InlineKeyboardButton(get_text("support_btn", lang), callback_data="qa_support")])
@@ -333,6 +388,7 @@ async def send_faq_page(update_or_query, context, page, lang):
     elif hasattr(update_or_query, 'edit_message_text'):
         await update_or_query.edit_message_text(text, reply_markup=keyboard)
 
+@typing_indicator_for_all
 async def remove_address_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = getattr(update, 'callback_query', None)
     if query is None or not hasattr(query, 'data') or query.data is None:
@@ -354,6 +410,7 @@ async def remove_address_callback(update: Update, context: ContextTypes.DEFAULT_
     if hasattr(query, 'message') and query.message is not None and hasattr(query.message, 'chat_id'):
         await context.bot.send_message(chat_id=query.message.chat_id, text=get_text("menu_message", lang), reply_markup=get_main_menu_keyboard(lang))
 
+@typing_indicator_for_all
 async def confirm_address_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = getattr(update, 'callback_query', None)
     if query is None or not hasattr(query, 'from_user') or query.from_user is None:
@@ -383,6 +440,7 @@ async def confirm_address_callback(update: Update, context: ContextTypes.DEFAULT
             reply_markup=get_main_menu_keyboard(lang)
         )
 
+@typing_indicator_for_all
 async def check_outages_for_new_address(update: Update, context: ContextTypes.DEFAULT_TYPE, address_data: dict):
     lang = get_user_lang(context)
     chat_id = safe_get(safe_get(update, 'effective_chat'), 'id')
@@ -411,6 +469,7 @@ async def check_outages_for_new_address(update: Update, context: ContextTypes.DE
     else:
         await context.bot.send_message(chat_id, get_text("no_past_outages", lang))
 
+@typing_indicator_for_all
 async def qa_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = safe_get(update, 'callback_query')
     lang = get_user_lang(context)
@@ -420,10 +479,12 @@ async def qa_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
     if data.startswith("faq_q_"):
         parts = data.split('_')
-        q_num = int(parts[2])
+        q_idx = int(parts[2])
         page = int(parts[3])
-        answer_key = f"qa_a{q_num}"
-        answer_text = get_text(answer_key, lang)
+        # Получаем правильный ключ вопроса и ответа
+        q_key = FAQ_QUESTION_KEYS[page * FAQ_PAGE_SIZE + q_idx]
+        a_key = FAQ_ANSWER_KEYS[page * FAQ_PAGE_SIZE + q_idx]
+        answer_text = get_text(a_key, lang)
         buttons = [[InlineKeyboardButton(get_text("back_btn", lang), callback_data=f"faq_page_{page}")]]
         keyboard = InlineKeyboardMarkup(buttons)
         await query.edit_message_text(answer_text, reply_markup=keyboard)
@@ -450,6 +511,7 @@ async def qa_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         await query.answer(get_text("unknown_command", lang), show_alert=True)
 
 # --- Helper for /language command ---
+@typing_indicator_for_all
 async def language_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Команда для смены языка. Показывает пользователю выбор языков и обновляет меню команд.
@@ -482,7 +544,57 @@ command_handlers = {
     "language": language_command
 }
 
+# --- Проверка адреса без добавления ---
+@typing_indicator_for_all
+async def check_address_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    lang = get_user_lang(context)
+    user_data = getattr(context, 'user_data', None)
+    safe_set_user_data(user_data, "step", "AWAITING_CHECK_ADDRESS_INPUT")
+    message = getattr(update, 'message', None)
+    if message is not None:
+        await message.reply_text(get_text("enter_street", lang, region=""), reply_markup=ReplyKeyboardRemove())
+
+@typing_indicator_for_all
+async def handle_check_address_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    lang = get_user_lang(context)
+    user_data = getattr(context, 'user_data', None)
+    message = getattr(update, 'message', None)
+    text = getattr(message, 'text', None) if message else None
+    if not text:
+        if message:
+            await message.reply_text(get_text("error_generic", lang))
+        return
+    if message:
+        await message.reply_text(get_text("address_verifying", lang))
+    from api_clients import get_verified_address_from_yandex
+    result = await get_verified_address_from_yandex(text, lang="ru_RU" if lang == "ru" else ("en_US" if lang == "en" else "hy_AM"))
+    if result:
+        # Проверка отключений по адресу
+        from db_manager import find_outages_for_address_text
+        outages = await find_outages_for_address_text(result['full_address'])
+        if outages:
+            outages_text = get_text('outage_check_on_add_found', lang)
+            for outage in outages:
+                outages_text += f"\n\n- {outage['source_type']}: {outage.get('start_datetime', 'N/A')}"
+
+            if message:
+                await message.reply_text(
+                    f"{get_text('address_confirm_prompt', lang, address=result['full_address'])}\n\n{outages_text}",
+                    reply_markup=get_main_menu_keyboard(lang)
+                )
+        else:
+            if message:
+                await message.reply_text(
+                    f"{get_text('address_confirm_prompt', lang, address=result['full_address'])}\n\n{get_text('outage_check_on_add_none_found', lang)}",
+                    reply_markup=get_main_menu_keyboard(lang)
+                )
+    else:
+        if message:
+            await message.reply_text(get_text("address_not_found_yandex", lang), reply_markup=get_main_menu_keyboard(lang))
+    safe_set_user_data(user_data, "step", UserSteps.NONE.name)
+
 # --- State Logic Handlers ---
+@typing_indicator_for_all
 async def handle_language_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = getattr(update, 'message', None)
     if message is None:
@@ -508,6 +620,7 @@ async def handle_language_selection(update: Update, context: ContextTypes.DEFAUL
     safe_set_user_data(user_data, "step", UserSteps.NONE.name)
     await message.reply_text(get_text("language_set_success", lang_code), reply_markup=get_main_menu_keyboard(lang_code))
 
+@typing_indicator_for_all
 async def handle_region_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = getattr(update, 'message', None)
     if message is None:
@@ -524,6 +637,7 @@ async def handle_region_selection(update: Update, context: ContextTypes.DEFAULT_
         await message.reply_text(get_text("enter_street", lang, region=region), reply_markup=ReplyKeyboardRemove())
     safe_set_user_data(getattr(context, 'user_data', None), "step", UserSteps.AWAITING_STREET.name)
 
+@typing_indicator_for_all
 async def handle_street_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = getattr(update, 'message', None)
     user_data = getattr(context, 'user_data', None)
@@ -568,6 +682,7 @@ async def handle_street_input(update: Update, context: ContextTypes.DEFAULT_TYPE
     finally:
         typing_task.cancel()
 
+@typing_indicator_for_all
 async def handle_frequency_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = getattr(update, 'message', None)
     user = getattr(update, 'effective_user', None)
@@ -592,6 +707,7 @@ async def handle_frequency_selection(update: Update, context: ContextTypes.DEFAU
         if inspect.isawaitable(result):
             await result
 
+@typing_indicator_for_all
 async def handle_support_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = getattr(update, 'effective_user', None)
     message = getattr(update, 'message', None)
@@ -655,6 +771,7 @@ def fuzzy_parse_time(text: str) -> Optional[str]:
     return None
 
 # --- Callback Query Handlers ---
+@typing_indicator_for_all
 async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = getattr(update, 'callback_query', None)
     if query is None or not hasattr(query, 'data') or query.data is None:
@@ -677,6 +794,7 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
         await cancel_callback(update, context)
     return
 
+@typing_indicator_for_all
 async def cancel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lang = get_user_lang(context)
     query = getattr(update, 'callback_query', None)
@@ -781,6 +899,7 @@ def main():
     log.info("Starting bot polling...")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
+@typing_indicator_for_all
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lang = get_user_lang(context)
     message = getattr(update, 'message', None)
@@ -803,6 +922,9 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif step == UserSteps.AWAITING_SUPPORT_MESSAGE.name:
         await handle_support_message(update, context)
         return
+    elif step == "AWAITING_CHECK_ADDRESS_INPUT":
+        await handle_check_address_input(update, context)
+        return
 
     if text == get_text("add_address_btn", lang):
         await add_address_command(update, context)
@@ -816,6 +938,8 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await qa_command(update, context)
     elif text == get_text("clear_addresses_btn", lang):
         await clear_addresses_command(update, context)
+    elif text == get_text("check_address_btn", lang):
+        await check_address_command(update, context)
     elif text == get_text("cancel", lang):
         safe_set_user_data(user_data, "step", UserSteps.NONE.name)
         if message is not None:
@@ -824,6 +948,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if message is not None:
             await message.reply_text(get_text("unknown_command", lang))
 
+@typing_indicator_for_all
 async def clear_addresses_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lang = get_user_lang(context)
     query = getattr(update, 'callback_query', None)
