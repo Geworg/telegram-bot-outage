@@ -216,7 +216,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_name = user_name.strip()
     if not user_in_db:
         safe_set_user_data(user_data, "step", UserSteps.AWAITING_INITIAL_LANG.name)
-        user_lang_code = safe_get(user, 'language_code')
+        user_lang_code = safe_get(user_data, "lang") or safe_get(user, 'language_code')
         if user_lang_code not in ['ru', 'en', 'hy']:
             user_lang_code = 'en'
         prompt = get_text("initial_language_prompt", user_lang_code)
@@ -232,6 +232,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await result
         await db_manager.create_or_update_user(user_id, user_lang_code, user_nick, user_name)
         safe_set_user_data(user_data, "lang", user_lang_code)
+        if application:
+            await update_user_commands_menu(application, user_lang_code, user_id)
     else:
         lang = user_in_db['language_code'] if user_in_db and 'language_code' in user_in_db else 'en'
         if lang not in ['ru', 'en', 'hy']:
@@ -422,8 +424,6 @@ async def remove_address_callback(update: Update, context: ContextTypes.DEFAULT_
         return
     await db_manager.remove_user_address(address_id_to_remove, user_id)
     await query.edit_message_text(get_text("address_removed_success", lang))
-    if hasattr(query, 'message') and query.message is not None and hasattr(query.message, 'chat_id'):
-        await context.bot.send_message(chat_id=query.message.chat_id, text=get_text("menu_message", lang), reply_markup=get_main_menu_keyboard(lang))
 
 @typing_indicator_for_all
 async def confirm_address_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -444,12 +444,8 @@ async def confirm_address_callback(update: Update, context: ContextTypes.DEFAULT
     )
     if success:
         await query.edit_message_text(get_text("address_added_success", lang), reply_markup=None)
-        if hasattr(query, 'message') and query.message is not None and hasattr(query.message, 'chat_id'):
-            await context.bot.send_message(
-                chat_id=query.message.chat_id,
-                text=get_text("menu_message", lang),
-                reply_markup=get_main_menu_keyboard(lang)
-            )
+        if user_data is not None:
+            user_data["step"] = UserSteps.NONE.name
         await check_outages_for_new_address(update, context, address_data)
     else:
         await query.edit_message_text(get_text("address_already_exists", lang))
@@ -675,6 +671,11 @@ async def handle_region_selection(update: Update, context: ContextTypes.DEFAULT_
     region = getattr(message, 'text', None)
     lang = get_user_lang(context)
     regions = get_regions_list(lang)
+    if region == get_text("cancel", lang):
+        safe_set_user_data(getattr(context, 'user_data', None), "step", UserSteps.NONE.name)
+        if hasattr(message, 'reply_text'):
+            await message.reply_text(get_text("action_cancelled", lang), reply_markup=get_main_menu_keyboard(lang))
+        return
     if region not in regions:
         if hasattr(message, 'reply_text'):
             await message.reply_text(get_text("unknown_command", lang))
@@ -998,16 +999,15 @@ async def clear_addresses_callback(update: Update, context: ContextTypes.DEFAULT
     user_data = getattr(context, 'user_data', None)
     user = getattr(query, 'from_user', None) if query else None
     user_id = getattr(user, 'id', None) if user else None
-    if query is not None and hasattr(query, 'data') and query.data == "confirm_clear_yes" and user_id is not None:
-        count = await db_manager.clear_all_user_addresses(user_id)
-        if user_data is not None:
-            user_data["step"] = UserSteps.NONE.name
-        await query.edit_message_text(get_text("all_addresses_cleared", lang), reply_markup=get_main_menu_keyboard(lang))
-    else:
-        if user_data is not None:
-            user_data["step"] = UserSteps.NONE.name
-        if query is not None and hasattr(query, 'edit_message_text'):
+    if query is not None and hasattr(query, 'data'):
+        if query.data == "confirm_clear_yes" and user_id is not None:
+            count = await db_manager.clear_all_user_addresses(user_id)
+            if user_data is not None:
+                user_data["step"] = UserSteps.NONE.name
+            await query.edit_message_text(get_text("all_addresses_cleared", lang), reply_markup=get_main_menu_keyboard(lang))
+        elif query.data == "cancel_action":
+            if user_data is not None:
+                user_data["step"] = UserSteps.NONE.name
             await query.edit_message_text(get_text("action_cancelled", lang), reply_markup=get_main_menu_keyboard(lang))
 
-if __name__ == "__main__":
-    main()
+# TODO: /clearaddres (1), /addaddress (1) and /checkaddress commands

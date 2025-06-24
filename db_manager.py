@@ -107,7 +107,9 @@ async def get_user(user_id: int) -> Optional[asyncpg.Record]:
     async with pool.acquire() as conn:
         return await conn.fetchrow("SELECT * FROM users WHERE user_id = $1", user_id)
 
-async def create_or_update_user(user_id: int, language_code: str, nick: str = 'none', name: str = ''):
+async def create_or_update_user(user_id: int, language_code: str, nick: str = '', name: str = ''):
+    if nick == 'none':
+        nick = ''
     if not pool: return
     async with pool.acquire() as conn:
         await conn.execute('''
