@@ -243,7 +243,6 @@ async def get_user_notification_count(user_id: int) -> int:
      async with pool.acquire() as conn:
         return await conn.fetchval("SELECT COUNT(*) FROM sent_notifications WHERE user_id = $1", user_id)
 
-# --- Заглушка для find_outages_for_address_text ---
 async def find_outages_for_address_text(address_text: str):
     """
     Находит все аварии (outages), где адрес (или его часть) встречается в деталях outage (armenian_text, streets, regions).
