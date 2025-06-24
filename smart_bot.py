@@ -1010,4 +1010,5 @@ async def clear_addresses_callback(update: Update, context: ContextTypes.DEFAULT
                 user_data["step"] = UserSteps.NONE.name
             await query.edit_message_text(get_text("action_cancelled", lang), reply_markup=get_main_menu_keyboard(lang))
 
+
 # TODO: /clearaddres (1), /addaddress (1) and /checkaddress commands
