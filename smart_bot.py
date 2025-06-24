@@ -677,7 +677,7 @@ async def handle_street_input(update: Update, context: ContextTypes.DEFAULT_TYPE
                 user_data["verified_address_cache"] = verified_address
             buttons = [[
                 InlineKeyboardButton(get_text("yes", lang), callback_data="confirm_address_yes"),
-                InlineKeyboardButton(get_text("no", lang), callback_data="cancel_action")
+                InlineKeyboardButton(get_text("no_cancel_action_btn", lang), callback_data="cancel_action")
             ]]
             keyboard = InlineKeyboardMarkup(buttons)
             escaped_address = verified_address['full_address'].replace('-', '\\-').replace('.', '\\.')
