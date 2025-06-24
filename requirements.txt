@@ -1,6 +1,7 @@
 aiofiles==23.2.1
 asyncpg==0.29.0
 beautifulsoup4==4.12.3
+deep-translator==1.11.4
 httpx==0.27.0
 psycopg2==2.9.10
 python-dotenv==1.0.1

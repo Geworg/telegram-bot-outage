@@ -3,10 +3,12 @@ import logging
 import requests
 from typing import List, Dict, Any, Optional
 
+# Новый импорт для deep-translator
+from deep_translator import GoogleTranslator
+
 log = logging.getLogger(__name__)
 
-TRANSLATION_API_KEY = os.getenv("TRANSLATION_API_KEY")
-TRANSLATION_MODEL = os.getenv("TRANSLATION_MODEL", "facebook/nllb-200-distilled-600M")
+# Удалены переменные, связанные с Hugging Face Translation API
 NER_API_KEY = os.getenv("NER_API_KEY")
 NER_MODEL = os.getenv("NER_MODEL", "dslim/bert-base-NER")
 
@@ -20,45 +22,23 @@ def load_models():
 
 def is_ai_available() -> bool:
     """
-    Проверяет, заданы ли API-ключи для Hugging Face.
+    Проверяет, задан ли API-ключ для Hugging Face NER (переводчик теперь не требует ключа).
     """
-    return bool(TRANSLATION_API_KEY and NER_API_KEY)
+    return bool(NER_API_KEY)
 
 def translate_armenian_to_english(text: str) -> Optional[str]:
     """
-    Переводит армянский текст на английский через Hugging Face API (NLLB-200).
+    Переводит армянский текст на английский через Google Translate (deep-translator).
+    Возвращает None при ошибке.
     """
-    if not TRANSLATION_API_KEY:
-        log.error("TRANSLATION_API_KEY is not set.")
-        return None
     try:
-        response = requests.post(
-            f"https://api-inference.huggingface.co/models/{TRANSLATION_MODEL}",
-            headers={"Authorization": f"Bearer {TRANSLATION_API_KEY}"},
-            json={
-                "inputs": text,
-                "parameters": {
-                    # Для facebook/nllb-200-distilled-600M используем коды hye_Armn → eng_Latn
-                    "src_lang": "hye_Armn", # армянский (армянский алфавит)
-                    "tgt_lang": "eng_Latn"  # английский (латиница)
-                }
-            }
-        )
-        response.raise_for_status()
-        data = response.json()
-        # NLLB-200 возвращает {'translation_text': '...'} или [{'translation_text': '...'}]
-        if isinstance(data, dict) and 'translation_text' in data:
-            return data['translation_text']
-        elif isinstance(data, list) and data and 'translation_text' in data[0]:
-            return data[0]['translation_text']
-        elif isinstance(data, dict) and 'error' in data:
-            log.error(f"Translation API error: {data['error']}")
+        translated = GoogleTranslator(source='hy', target='en').translate(text)
+        if not translated or not isinstance(translated, str):
+            log.error(f"GoogleTranslator returned empty or invalid result for: {text}")
             return None
-        else:
-            log.error(f"Unexpected translation API response: {data}")
-            return None
+        return translated
     except Exception as e:
-        log.error(f"Translation API call failed: {e}", exc_info=True)
+        log.error(f"GoogleTranslator translation failed: {e}", exc_info=True)
         return None
 
 def extract_entities_from_text(text: str) -> List[Dict[str, Any]]:

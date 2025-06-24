@@ -15,6 +15,7 @@ paths.txt
 *.cache
 .cache_ggshield
 __pycache__/
+*__pycache__
 *.py[cod]
 *.log
 *.logs

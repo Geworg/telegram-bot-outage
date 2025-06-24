@@ -68,7 +68,21 @@ class UserSteps(Enum):
 ADMIN_IDS = [int(i) for i in os.getenv("ADMIN_USER_IDS", "").split(',') if i]
 SUPPORT_CHAT_ID = os.getenv("SUPPORT_CHAT_ID")
 TIER_ORDER = ["Free", "Basic", "Premium", "Ultra"]
-REGIONS_LIST = ["Երևան", "Արագածոտն", "Արարատ", "Արմավիր", "Գեղարքունիք", "Լոռի", "Կոտայք", "Շիրակ", "Սյունիք", "Վայոց Ձոր", "Տավուշ"]
+REGIONS_LISTS = {
+    "hy": [
+        "Երևան", "Արագածոտն", "Արարատ", "Արմավիր", "Գեղարքունիք", "Լոռի", "Կոտայք", "Շիրակ", "Սյունիք", "Վայոց Ձոր", "Տավուշ"
+    ],
+    "ru": [
+        "Ереван", "Арагацотн", "Арарат", "Армавир", "Гегаркуник", "Лори", "Котайк", "Ширак", "Сюник", "Вайоц Дзор", "Тавуш"
+    ],
+    "en": [
+        "Yerevan", "Aragatsotn", "Ararat", "Armavir", "Gegharkunik", "Lori", "Kotayk", "Shirak", "Syunik", "Vayots Dzor", "Tavush"
+    ]
+}
+
+def get_regions_list(lang: str) -> list:
+    return REGIONS_LISTS.get(lang, REGIONS_LISTS["en"])
+
 FREQUENCY_OPTIONS = {
     "Free_6h": {"interval": 21600, "hy": "⏱ 6 ժամ", "ru": "⏱ 6 часов", "en": "⏱ 6 hours", "tier": "Free"},
     "Free_12h": {"interval": 43200, "hy": "⏱ 12 ժամ", "ru": "⏱ 12 часов", "en": "⏱ 12 hours", "tier": "Free"},
@@ -77,6 +91,11 @@ FREQUENCY_OPTIONS = {
     "Ultra_15m": {"interval": 900, "hy": "⏱ 15 րոպե", "ru": "⏱ 15 минут", "en": "⏱ 15 min", "tier": "Ultra"},
 }
 
+# --- Новый массив ключей для FAQ ---
+FAQ_QUESTION_KEYS = [f"qa_q{i+1}" for i in range(20)]
+FAQ_ANSWER_KEYS = [f"qa_a{i+1}" for i in range(20)]
+FAQ_PAGE_SIZE = 5
+
 # --- Helper & Utility Functions ---
 def get_user_lang(context: ContextTypes.DEFAULT_TYPE) -> str:
     """Gets user language from context, falling back to 'en'."""
@@ -84,7 +103,7 @@ def get_user_lang(context: ContextTypes.DEFAULT_TYPE) -> str:
     if user_data is None or not hasattr(user_data, 'get'):
         return 'en'
     lang = user_data.get("lang", "en")
-    if lang not in ['ru', 'en']:
+    if lang not in ['ru', 'en', 'hy']:
         return 'en'
     return lang
 
@@ -153,10 +172,15 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     user_in_db = await db_manager.get_user(user_id)
     user_data = safe_get(context, 'user_data')
+    application = getattr(context, 'application', None)
+    # Получаем nick и name
+    user_nick = getattr(user, 'username', 'none') or 'none'
+    user_name = (getattr(user, 'first_name', '') or '') + (' ' + getattr(user, 'last_name', '') if getattr(user, 'last_name', '') else '')
+    user_name = user_name.strip()
     if not user_in_db:
         safe_set_user_data(user_data, "step", UserSteps.AWAITING_INITIAL_LANG.name)
         user_lang_code = safe_get(user, 'language_code')
-        if user_lang_code not in ['ru', 'en']:
+        if user_lang_code not in ['ru', 'en', 'hy']:
             user_lang_code = 'en'
         prompt = get_text("initial_language_prompt", user_lang_code)
         buttons = [
@@ -168,22 +192,27 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         result = safe_call(message, 'reply_text', prompt, reply_markup=keyboard)
         if inspect.isawaitable(result):
             await result
-        await db_manager.create_or_update_user(user_id, user_lang_code)
+        await db_manager.create_or_update_user(user_id, user_lang_code, user_nick, user_name)
         safe_set_user_data(user_data, "lang", user_lang_code)
     else:
         lang = user_in_db['language_code'] if user_in_db and 'language_code' in user_in_db else 'en'
-        if lang not in ['ru', 'en']:
+        if lang not in ['ru', 'en', 'hy']:
             lang = 'en'
         safe_set_user_data(user_data, "lang", lang)
         safe_set_user_data(user_data, "step", UserSteps.NONE.name)
+        if application:
+            await set_bot_commands(application, lang, user_id=user_id)
         result = safe_call(message, 'reply_text', get_text("menu_message", lang), reply_markup=get_main_menu_keyboard(lang))
         if inspect.isawaitable(result):
             await result
+    # Всегда обновляем nick и name при старте
+    await db_manager.create_or_update_user(user_id, safe_get(user, 'language_code', 'en'), user_nick, user_name)
 
 async def add_address_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lang = get_user_lang(context)
     safe_set_user_data(getattr(context, 'user_data', None), "step", UserSteps.AWAITING_REGION.name)
-    buttons = [[KeyboardButton(r)] for r in REGIONS_LIST]
+    regions = get_regions_list(lang)
+    buttons = [[KeyboardButton(r)] for r in regions]
     buttons.append([KeyboardButton(get_text("cancel", lang))])
     keyboard = ReplyKeyboardMarkup(buttons, resize_keyboard=True, one_time_keyboard=True)
     message = getattr(update, 'message', None)
@@ -269,127 +298,195 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def clear_addresses_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lang = get_user_lang(context)
+    user = getattr(update, 'effective_user', None)
+    message = getattr(update, 'message', None)
+    user_id = getattr(user, 'id', None)
+    if user_id is None or message is None:
+        return
+    addresses = await db_manager.get_user_addresses(user_id)
+    if not addresses:
+        await message.reply_text(get_text("no_addresses_yet", lang), reply_markup=get_main_menu_keyboard(lang))
+        return
     buttons = [[
         InlineKeyboardButton(get_text("yes", lang), callback_data="confirm_clear_yes"),
-        InlineKeyboardButton(get_text("no", lang), callback_data="cancel_action")
+        InlineKeyboardButton(get_text("no_cancel_action_btn", lang), callback_data="cancel_action")
     ]]
     keyboard = InlineKeyboardMarkup(buttons)
-    message = getattr(update, 'message', None)
-    if message is not None:
-        await message.reply_text(get_text("clear_addresses_prompt", lang), reply_markup=keyboard)
+    await message.reply_text(get_text("clear_addresses_prompt", lang), reply_markup=keyboard)
 
 async def qa_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lang = get_user_lang(context)
-    buttons = [
-        [InlineKeyboardButton(get_text("qa_placeholder_q1", lang), callback_data="qa_1")],
-        [InlineKeyboardButton(get_text("qa_placeholder_q2", lang), callback_data="qa_2")],
-        [InlineKeyboardButton(get_text("support_btn", lang), callback_data="qa_support")],
-        [InlineKeyboardButton(get_text("back_btn", lang), callback_data="qa_back")]
-    ]
+    page = 0
+    user_data = getattr(context, 'user_data', None)
+    if user_data is not None:
+        user_data['faq_page'] = page
+    await send_faq_page(update, context, page, lang)
+
+async def send_faq_page(update_or_query, context, page, lang):
+    start = page * FAQ_PAGE_SIZE
+    end = start + FAQ_PAGE_SIZE
+    question_keys = FAQ_QUESTION_KEYS[start:end]
+    buttons = [[InlineKeyboardButton(get_text(qk, lang), callback_data=f"faq_q_{i+1}_{page}")]
+               for i, qk in enumerate(question_keys, start=start)]
+    nav_buttons = []
+    if page > 0:
+        nav_buttons.append(InlineKeyboardButton("⏮ Назад", callback_data=f"faq_prev_{page}"))
+    if end < len(FAQ_QUESTION_KEYS):
+        nav_buttons.append(InlineKeyboardButton("⏭ Вперёд", callback_data=f"faq_next_{page}"))
+    if nav_buttons:
+        buttons.append(nav_buttons)
+    buttons.append([InlineKeyboardButton(get_text("support_btn", lang), callback_data="qa_support")])
     keyboard = InlineKeyboardMarkup(buttons)
-    message = getattr(update, 'message', None)
-    if message is not None:
-        await message.reply_text(get_text("qa_title", lang), reply_markup=keyboard)
+    text = get_text("qa_title", lang)
+    if hasattr(update_or_query, 'message') and update_or_query.message is not None:
+        await update_or_query.message.reply_text(text, reply_markup=keyboard)
+    elif hasattr(update_or_query, 'edit_message_text'):
+        await update_or_query.edit_message_text(text, reply_markup=keyboard)
 
-@admin_only
-async def maintenance_on_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await db_manager.set_bot_status("maintenance_mode", "true")
+async def remove_address_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = getattr(update, 'callback_query', None)
+    if query is None or not hasattr(query, 'data') or query.data is None:
+        return
     lang = get_user_lang(context)
-    message = getattr(update, 'message', None)
-    user = getattr(update, 'effective_user', None)
+    data_parts = query.data.split('_')
+    if len(data_parts) < 3:
+        return
+    try:
+        address_id_to_remove = int(data_parts[2])
+    except ValueError:
+        return
+    user = getattr(query, 'from_user', None)
     user_id = getattr(user, 'id', None)
-    if message is not None:
-        await message.reply_text(get_text("maintenance_on_feedback", lang))
-    if user_id is not None:
-        log.info(f"Admin {user_id} enabled maintenance mode.")
+    if user_id is None:
+        return
+    await db_manager.remove_user_address(address_id_to_remove, user_id)
+    await query.edit_message_text(get_text("address_removed_success", lang))
+    if hasattr(query, 'message') and query.message is not None and hasattr(query.message, 'chat_id'):
+        await context.bot.send_message(chat_id=query.message.chat_id, text=get_text("menu_message", lang), reply_markup=get_main_menu_keyboard(lang))
 
-@admin_only
-async def maintenance_off_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await db_manager.set_bot_status("maintenance_mode", "false")
-    lang = get_user_lang(context)
-    message = getattr(update, 'message', None)
-    user = getattr(update, 'effective_user', None)
-    user_id = getattr(user, 'id', None)
-    if message is not None:
-        await message.reply_text(get_text("maintenance_off_feedback", lang))
-    if user_id is not None:
-        log.info(f"Admin {user_id} disabled maintenance mode.")
-
-# --- Заглушка для отсутствующей функции в db_manager ---
-if not hasattr(db_manager, 'find_outages_for_address_text'):
-    async def find_outages_for_address_text(address_text):
-        return []
-    setattr(db_manager, 'find_outages_for_address_text', find_outages_for_address_text)
-
-# --- Callback: clear_addresses_callback ---
-async def clear_addresses_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def confirm_address_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = getattr(update, 'callback_query', None)
     if query is None or not hasattr(query, 'from_user') or query.from_user is None:
         return
     user_id = getattr(query.from_user, 'id', None)
     lang = get_user_lang(context)
-    if user_id is None:
-        return
-    await db_manager.clear_all_user_addresses(user_id)
-    if hasattr(query, 'edit_message_text') and callable(query.edit_message_text):
-        result = safe_call(query, 'edit_message_text', get_text("all_addresses_cleared", lang))
-        if inspect.isawaitable(result):
-            await result
-    chat = getattr(update, 'effective_chat', None)
-    chat_id = getattr(chat, 'id', None)
-    if chat_id is not None:
-        await context.bot.send_message(chat_id=chat_id, text=get_text("menu_message", lang), reply_markup=get_main_menu_keyboard(lang))
-
-# --- Main Message Router ---
-async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    is_maintenance = await db_manager.get_bot_status("maintenance_mode")
-    user = getattr(update, 'effective_user', None)
-    message = getattr(update, 'message', None)
-    if is_maintenance == "true" and (user is None or getattr(user, 'id', None) not in ADMIN_IDS):
-        lang = get_user_lang(context)
-        if message is not None and hasattr(message, 'reply_text'):
-            await message.reply_text(get_text("maintenance_user_notification", lang))
-        return
     user_data = getattr(context, 'user_data', None)
-    step = safe_get_user_data(user_data, "step")
-    lang = get_user_lang(context)
-    if message and hasattr(message, 'text') and message.text == get_text("cancel", lang):
-        safe_set_user_data(user_data, "step", UserSteps.NONE.name)
-        if hasattr(message, 'reply_text'):
-            await message.reply_text(get_text("action_cancelled", lang), reply_markup=get_main_menu_keyboard(lang))
+    address_data = user_data.pop("verified_address_cache", None) if user_data is not None and hasattr(user_data, 'pop') else None
+    if not address_data or user_id is None:
+        await query.edit_message_text("Error: Cached address data expired.")
         return
-    step_handlers = {
-        UserSteps.AWAITING_INITIAL_LANG.name: handle_language_selection,
-        UserSteps.AWAITING_REGION.name: handle_region_selection,
-        UserSteps.AWAITING_STREET.name: handle_street_input,
-        UserSteps.AWAITING_FREQUENCY.name: handle_frequency_selection,
-        UserSteps.AWAITING_SUPPORT_MESSAGE.name: handle_support_message,
-        UserSteps.NONE.name: handle_main_menu_text,
-    }
-    handler = step_handlers.get(step) if step is not None else handle_main_menu_text
-    if handler is not None and callable(handler):
-        await handler(update, context)
+    success = await db_manager.add_user_address(
+        user_id=user_id, region=address_data.get('region', 'N/A'),
+        street=address_data.get('street', 'N/A'), full_address=address_data.get('full_address'),
+        lat=address_data.get('latitude'), lon=address_data.get('longitude')
+    )
+    if success:
+        await query.edit_message_text(get_text("address_added_success", lang))
+        await check_outages_for_new_address(update, context, address_data)
+    else:
+        await query.edit_message_text(get_text("address_already_exists", lang))
+    if user_data is not None:
+        user_data["step"] = UserSteps.NONE.name
+    if hasattr(query, 'message') and query.message is not None and hasattr(query.message, 'chat_id'):
+        await context.bot.send_message(
+            chat_id=query.message.chat_id, text=get_text("menu_message", lang),
+            reply_markup=get_main_menu_keyboard(lang)
+        )
 
-async def handle_main_menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def check_outages_for_new_address(update: Update, context: ContextTypes.DEFAULT_TYPE, address_data: dict):
+    lang = get_user_lang(context)
+    chat_id = safe_get(safe_get(update, 'effective_chat'), 'id')
+    if chat_id is None:
+        return
+    await context.bot.send_message(chat_id, get_text("outage_check_on_add_title", lang), parse_mode=ParseMode.MARKDOWN_V2)
+    coros = [
+        parse_all_water_announcements_async(),
+        parse_all_gas_announcements_async(),
+        parse_all_electric_announcements_async()
+    ]
+    await asyncio.gather(*(c for c in coros if c is not None))
+    all_recent_outages = await db_manager.find_outages_for_address_text(address_data['full_address'])
+    if not all_recent_outages:
+        await context.bot.send_message(chat_id, get_text("outage_check_on_add_none_found", lang))
+    else:
+        response_text = get_text("outage_check_on_add_found", lang)
+        for outage in all_recent_outages:
+            response_text += f"\n\n- {outage['source_type']}: {outage.get('start_datetime', 'N/A')}"
+
+        await context.bot.send_message(chat_id, response_text)
+
+    last_outage = await db_manager.get_last_outage_for_address(address_data['full_address'])
+    if last_outage:
+        await context.bot.send_message(chat_id, f"{get_text('last_outage_recorded', lang)} {last_outage['end_datetime'].strftime('%Y-%m-%d')}")
+    else:
+        await context.bot.send_message(chat_id, get_text("no_past_outages", lang))
+
+async def qa_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = safe_get(update, 'callback_query')
+    lang = get_user_lang(context)
+    data = safe_get(query, 'data')
+    user_data = getattr(context, 'user_data', None)
+    if query is None or not data:
+        return
+    if data.startswith("faq_q_"):
+        # faq_q_{num}_{page}
+        parts = data.split('_')
+        q_num = int(parts[2])
+        page = int(parts[3])
+        answer_key = f"qa_a{q_num}"
+        answer_text = get_text(answer_key, lang)
+        buttons = [[InlineKeyboardButton(get_text("back_btn", lang), callback_data=f"faq_page_{page}")]]
+        keyboard = InlineKeyboardMarkup(buttons)
+        await query.edit_message_text(answer_text, reply_markup=keyboard)
+    elif data.startswith("faq_page_"):
+        # faq_page_{page}
+        page = int(data.split('_')[2])
+        await send_faq_page(query, context, page, lang)
+    elif data.startswith("faq_prev_"):
+        page = int(data.split('_')[2]) - 1
+        if user_data is not None:
+            user_data['faq_page'] = page
+        await send_faq_page(query, context, page, lang)
+    elif data.startswith("faq_next_"):
+        page = int(data.split('_')[2]) + 1
+        if user_data is not None:
+            user_data['faq_page'] = page
+        await send_faq_page(query, context, page, lang)
+    elif data == "qa_support":
+        safe_set_user_data(user_data, "step", UserSteps.AWAITING_SUPPORT_MESSAGE.name)
+        await query.edit_message_text(get_text("support_prompt", lang))
+    elif data == "qa_back":
+        page = user_data.get('faq_page', 0) if user_data else 0
+        await send_faq_page(query, context, page, lang)
+    else:
+        await query.answer(get_text("unknown_command", lang), show_alert=True)
+
+# --- Helper for /language command ---
+async def language_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Команда для смены языка. Показывает пользователю выбор языков.
+    """
     message = getattr(update, 'message', None)
     if message is None:
         return
-    text = message.text
-    lang = get_user_lang(context)
-    menu_map = {
-        get_text("add_address_btn", lang): add_address_command,
-        get_text("remove_address_btn", lang): remove_address_command,
-        get_text("my_addresses_btn", lang): my_addresses_command,
-        get_text("frequency_btn", lang): frequency_command,
-        get_text("qa_btn", lang): qa_command,
-        get_text("stats_btn", lang): stats_command,
-        get_text("clear_addresses_btn", lang): clear_addresses_command,
-    }
-    command_to_run = menu_map.get(text)
-    if command_to_run:
-        await command_to_run(update, context)
-    else:
-        await message.reply_text(get_text("unknown_command", lang), reply_markup=get_main_menu_keyboard(lang))
+    user_data = getattr(context, 'user_data', None)
+    safe_set_user_data(user_data, "step", UserSteps.AWAITING_INITIAL_LANG.name)
+    prompt = get_text("change_language_prompt", get_user_lang(context))
+    buttons = [
+        [KeyboardButton("\U0001F1E6\U0001F1F2 Հայերեն")],
+        [KeyboardButton("\U0001F1F7\U0001F1FA Русский")],
+        [KeyboardButton("\U0001F1EC\U0001F1E7 English")]
+    ]
+    keyboard = ReplyKeyboardMarkup(buttons, resize_keyboard=True, one_time_keyboard=True)
+    await message.reply_text(prompt, reply_markup=keyboard)
+
+# --- Command & Callback Handlers ---
+command_handlers = {
+    "start": start_command, "myaddresses": my_addresses_command,
+    "frequency": frequency_command, "stats": stats_command,
+    "clearaddresses": clear_addresses_command, "qa": qa_command,
+    "language": language_command  # Новая команда для смены языка
+}
 
 # --- State Logic Handlers ---
 async def handle_language_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -411,10 +508,9 @@ async def handle_language_selection(update: Update, context: ContextTypes.DEFAUL
     user_id = getattr(user, 'id', None)
     if user_id is not None:
         await db_manager.update_user_language(user_id, lang_code)
-    # Обновить команды бота на выбранном языке
     application = getattr(context, 'application', None)
-    if application:
-        await set_bot_commands(application, lang_code)
+    if application and user_id:
+        await set_bot_commands(application, lang_code, user_id=user_id)
     await message.reply_text(
         get_text("language_set_success", lang_code),
         reply_markup=get_main_menu_keyboard(lang_code)
@@ -427,13 +523,13 @@ async def handle_region_selection(update: Update, context: ContextTypes.DEFAULT_
     if message is None:
         return
     region = getattr(message, 'text', None)
-    if region not in REGIONS_LIST:
-        lang = get_user_lang(context)
+    lang = get_user_lang(context)
+    regions = get_regions_list(lang)
+    if region not in regions:
         if hasattr(message, 'reply_text'):
             await message.reply_text(get_text("unknown_command", lang))
         return
     safe_set_user_data(getattr(context, 'user_data', None), "selected_region", region)
-    lang = get_user_lang(context)
     if hasattr(message, 'reply_text'):
         await message.reply_text(get_text("enter_street", lang, region=region), reply_markup=ReplyKeyboardRemove())
     safe_set_user_data(getattr(context, 'user_data', None), "step", UserSteps.AWAITING_STREET.name)
@@ -441,22 +537,28 @@ async def handle_region_selection(update: Update, context: ContextTypes.DEFAULT_
 # Безопасная работа с context.user_data и .get/.pop
 async def handle_street_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = getattr(update, 'message', None)
-    chat = getattr(update, 'effective_chat', None)
-    if message is None or chat is None:
-        return
-    chat_id = getattr(chat, 'id', None)
-    if chat_id is None:
-        return
+    user_data = getattr(context, 'user_data', None)
     lang = get_user_lang(context)
-    typing_task = asyncio.create_task(send_typing_periodically(context, chat_id))
+    if message is None:
+        return
+    text = getattr(message, 'text', None)
+    if not text or text == get_text("cancel", lang):
+        safe_set_user_data(user_data, "step", UserSteps.NONE.name)
+        if hasattr(message, 'reply_text'):
+            await message.reply_text(get_text("action_cancelled", lang), reply_markup=get_main_menu_keyboard(lang))
+        return
+    # Показываем клавиатуру с кнопкой "Отмена" при вводе адреса
+    cancel_keyboard = ReplyKeyboardMarkup(
+        [[KeyboardButton(get_text("cancel", lang))]],
+        resize_keyboard=True, one_time_keyboard=True
+    )
+    typing_task = asyncio.create_task(send_typing_periodically(context, message.chat_id))
     try:
-        street_text = getattr(message, 'text', None)
         region = None
-        user_data = getattr(context, 'user_data', None)
         if user_data is not None and hasattr(user_data, 'get'):
             region = user_data.get("selected_region", "Armenia")
-        full_query = f"{region}, {street_text}"
-        await message.reply_text(get_text("address_verifying", lang))
+        full_query = f"{region}, {text}"
+        await message.reply_text(get_text("address_verifying", lang), reply_markup=cancel_keyboard)
         verified_address = await api_clients.get_verified_address_from_yandex(full_query)
         if verified_address and verified_address.get('full_address'):
             if user_data is not None:
@@ -555,15 +657,12 @@ def fuzzy_parse_time(text: str) -> Optional[str]:
     Возвращает None, если не удалось распознать.
     """
     text = text.strip().replace(',', ':').replace('.', ':').replace('-', ':').replace(' ', ':')
-    # Пример: 2230 -> 22:30
     if re.fullmatch(r'\d{4}', text):
         return f"{text[:2]}:{text[2:]}"
-    # Пример: 22:30 или 22:3
     m = re.match(r'^(\d{1,2}):(\d{1,2})$', text)
     if m:
         h, m_ = m.groups()
         return f"{int(h):02d}:{int(m_):02d}"
-    # Пример: 22
     if re.fullmatch(r'\d{1,2}', text):
         return f"{int(text):02d}:00"
     return None
@@ -591,106 +690,15 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
         await cancel_callback(update, context)
     return
 
-async def remove_address_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def cancel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    lang = get_user_lang(context)
     query = getattr(update, 'callback_query', None)
-    if query is None or not hasattr(query, 'data') or query.data is None:
-        return
-    lang = get_user_lang(context)
-    data_parts = query.data.split('_')
-    if len(data_parts) < 3:
-        return
-    try:
-        address_id_to_remove = int(data_parts[2])
-    except ValueError:
-        return
-    user = getattr(query, 'from_user', None)
-    user_id = getattr(user, 'id', None)
-    if user_id is None:
-        return
-    await db_manager.remove_user_address(address_id_to_remove, user_id)
-    await query.edit_message_text(get_text("address_removed_success", lang))
-    if hasattr(query, 'message') and query.message is not None and hasattr(query.message, 'chat_id'):
-        await context.bot.send_message(chat_id=query.message.chat_id, text=get_text("menu_message", lang), reply_markup=get_main_menu_keyboard(lang))
-
-async def confirm_address_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = getattr(update, 'callback_query', None)
-    if query is None or not hasattr(query, 'from_user') or query.from_user is None:
-        return
-    user_id = getattr(query.from_user, 'id', None)
-    lang = get_user_lang(context)
-    user_data = getattr(context, 'user_data', None)
-    address_data = user_data.pop("verified_address_cache", None) if user_data is not None and hasattr(user_data, 'pop') else None
-    if not address_data or user_id is None:
-        await query.edit_message_text("Error: Cached address data expired.")
-        return
-    success = await db_manager.add_user_address(
-        user_id=user_id, region=address_data.get('region', 'N/A'),
-        street=address_data.get('street', 'N/A'), full_address=address_data.get('full_address'),
-        lat=address_data.get('latitude'), lon=address_data.get('longitude')
-    )
-    if success:
-        await query.edit_message_text(get_text("address_added_success", lang))
-        await check_outages_for_new_address(update, context, address_data)
+    if query is not None and hasattr(query, 'edit_message_text'):
+        await query.edit_message_text(get_text("action_cancelled", lang), reply_markup=get_main_menu_keyboard(lang))
     else:
-        await query.edit_message_text(get_text("address_already_exists", lang))
-    if user_data is not None:
-        user_data["step"] = UserSteps.NONE.name
-    if hasattr(query, 'message') and query.message is not None and hasattr(query.message, 'chat_id'):
-        await context.bot.send_message(
-            chat_id=query.message.chat_id, text=get_text("menu_message", lang),
-            reply_markup=get_main_menu_keyboard(lang)
-        )
-
-async def check_outages_for_new_address(update: Update, context: ContextTypes.DEFAULT_TYPE, address_data: dict):
-    lang = get_user_lang(context)
-    chat_id = safe_get(safe_get(update, 'effective_chat'), 'id')
-    if chat_id is None:
-        return
-    await context.bot.send_message(chat_id, get_text("outage_check_on_add_title", lang), parse_mode=ParseMode.MARKDOWN_V2)
-    coros = [
-        parse_all_water_announcements_async(),
-        parse_all_gas_announcements_async(),
-        parse_all_electric_announcements_async()
-    ]
-    await asyncio.gather(*(c for c in coros if c is not None))
-    all_recent_outages = await db_manager.find_outages_for_address_text(address_data['full_address'])
-    if not all_recent_outages:
-        await context.bot.send_message(chat_id, get_text("outage_check_on_add_none_found", lang))
-    else:
-        response_text = get_text("outage_check_on_add_found", lang)
-        for outage in all_recent_outages:
-            response_text += f"\n\n- {outage['source_type']}: {outage.get('start_datetime', 'N/A')}"
-
-        await context.bot.send_message(chat_id, response_text)
-
-    last_outage = await db_manager.get_last_outage_for_address(address_data['full_address'])
-    if last_outage:
-        await context.bot.send_message(chat_id, f"{get_text('last_outage_recorded', lang)} {last_outage['end_datetime'].strftime('%Y-%m-%d')}")
-    else:
-        await context.bot.send_message(chat_id, get_text("no_past_outages", lang))
-
-async def qa_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = safe_get(update, 'callback_query')
-    lang = get_user_lang(context)
-    data = safe_get(query, 'data')
-    if query is None or not data:
-        return
-    action = data.split('_')[-1] if data else None
-    user_data = getattr(context, 'user_data', None)
-    if action == "support":
-        safe_set_user_data(user_data, "step", UserSteps.AWAITING_SUPPORT_MESSAGE.name)
-        result = safe_call(query, 'edit_message_text', get_text("support_prompt", lang))
-        if inspect.isawaitable(result):
-            await result
-    elif action == "back":
-        result = safe_call(query, 'delete')
-        if inspect.isawaitable(result):
-            await result
-    else:
-        answer_key = f"qa_placeholder_a{action}"
-        result = safe_call(query, 'answer', text=get_text(answer_key, lang), show_alert=True)
-        if inspect.isawaitable(result):
-            await result
+        message = getattr(update, 'message', None)
+        if message is not None and hasattr(message, 'reply_text'):
+            await message.reply_text(get_text("action_cancelled", lang), reply_markup=get_main_menu_keyboard(lang))
 
 # --- Periodic Jobs ---
 async def periodic_site_check_job(context: ContextTypes.DEFAULT_TYPE):
@@ -704,8 +712,8 @@ async def periodic_site_check_job(context: ContextTypes.DEFAULT_TYPE):
     log.info("Periodic site check job finished.")
 
 # --- Application Setup ---
-async def set_bot_commands(application: Application, lang: str):
-    """Устанавливает команды бота с описаниями на нужном языке."""
+async def set_bot_commands(application: Application, lang: str, user_id: Optional[int] = None):
+    """Устанавливает команды бота с описаниями на нужном языке для конкретного пользователя (если user_id указан)."""
     commands = [
         BotCommand("start", get_text("cmd_start", lang)),
         BotCommand("myaddresses", get_text("cmd_myaddresses", lang)),
@@ -715,7 +723,10 @@ async def set_bot_commands(application: Application, lang: str):
         BotCommand("stats", get_text("cmd_stats", lang)),
         BotCommand("language", get_text("cmd_language", lang)),
     ]
-    await application.bot.set_my_commands(commands, language_code=lang)
+    if user_id is not None:
+        await application.bot.set_my_commands(commands, language_code=lang, scope={"type": "chat", "chat_id": int(user_id)})
+    else:
+        await application.bot.set_my_commands(commands, language_code=lang)
 
 async def post_init(application: Application):
     await db_manager.init_db_pool()
@@ -743,9 +754,7 @@ def main():
         "start": start_command, "myaddresses": my_addresses_command,
         "frequency": frequency_command, "stats": stats_command,
         "clearaddresses": clear_addresses_command, "qa": qa_command,
-        "maintenance_on": maintenance_on_command,
-        "maintenance_off": maintenance_off_command,
-        "language": language_command  # Новая команда для смены языка
+        "language": language_command
     }
     for command, handler in command_handlers.items():
         application.add_handler(CommandHandler(command, handler))
@@ -764,30 +773,28 @@ def main():
     log.info("Starting bot polling...")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
-# --- Handler for /language command ---
-async def language_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Команда для смены языка. Показывает пользователю выбор языков.
-    """
-    message = getattr(update, 'message', None)
-    if message is None:
-        return
-    user_data = getattr(context, 'user_data', None)
-    safe_set_user_data(user_data, "step", UserSteps.AWAITING_INITIAL_LANG.name)
-    prompt = get_text("change_language_prompt", get_user_lang(context))
-    buttons = [
-        [KeyboardButton("\U0001F1E6\U0001F1F2 Հայերեն")],
-        [KeyboardButton("\U0001F1F7\U0001F1FA Русский")],
-        [KeyboardButton("\U0001F1EC\U0001F1E7 English")]
-    ]
-    keyboard = ReplyKeyboardMarkup(buttons, resize_keyboard=True, one_time_keyboard=True)
-    await message.reply_text(prompt, reply_markup=keyboard)
 
-async def cancel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lang = get_user_lang(context)
     message = getattr(update, 'message', None)
-    if message is not None and hasattr(message, 'reply_text'):
-        await message.reply_text(get_text("action_cancelled", lang), reply_markup=get_main_menu_keyboard(lang))
+    user = getattr(update, 'effective_user', None)
+    if user is not None:
+        user_id = getattr(user, 'id', None)
+        user_nick = getattr(user, 'username', 'none') or 'none'
+        user_name = (getattr(user, 'first_name', '') or '') + (' ' + getattr(user, 'last_name', '') if getattr(user, 'last_name', '') else '')
+        user_name = user_name.strip()
+        user_lang_code = getattr(user, 'language_code', 'en')
+        if user_id is not None:
+            await db_manager.create_or_update_user(user_id, user_lang_code, user_nick, user_name)
+    if message is not None:
+        await message.reply_text(get_text("unknown_command", lang))
+
+# Вставляем заглушку clear_addresses_callback, если она отсутствует
+async def clear_addresses_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    lang = get_user_lang(context)
+    query = getattr(update, 'callback_query', None)
+    if query is not None and hasattr(query, 'edit_message_text'):
+        await query.edit_message_text(get_text("action_cancelled", lang), reply_markup=get_main_menu_keyboard(lang))
 
 if __name__ == "__main__":
     main()
