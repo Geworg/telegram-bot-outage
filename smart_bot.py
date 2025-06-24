@@ -430,17 +430,21 @@ async def confirm_address_callback(update: Update, context: ContextTypes.DEFAULT
         lat=address_data.get('latitude'), lon=address_data.get('longitude')
     )
     if success:
-        await query.edit_message_text(get_text("address_added_success", lang))
+        # 1. Удаляем inline-клавиатуру и показываем сообщение об успехе
+        await query.edit_message_text(get_text("address_added_success", lang), reply_markup=None)
+        # 2. Отправляем главное меню с ReplyKeyboardMarkup (только один раз)
+        if hasattr(query, 'message') and query.message is not None and hasattr(query.message, 'chat_id'):
+            await context.bot.send_message(
+                chat_id=query.message.chat_id,
+                text=get_text("menu_message", lang),
+                reply_markup=get_main_menu_keyboard(lang)
+            )
+        # 3. Проверяем отключения
         await check_outages_for_new_address(update, context, address_data)
     else:
         await query.edit_message_text(get_text("address_already_exists", lang))
     if user_data is not None:
         user_data["step"] = UserSteps.NONE.name
-    if hasattr(query, 'message') and query.message is not None and hasattr(query.message, 'chat_id'):
-        await context.bot.send_message(
-            chat_id=query.message.chat_id, text=get_text("menu_message", lang),
-            reply_markup=get_main_menu_keyboard(lang)
-        )
 
 @typing_indicator_for_all
 async def check_outages_for_new_address(update: Update, context: ContextTypes.DEFAULT_TYPE, address_data: dict):
@@ -449,12 +453,6 @@ async def check_outages_for_new_address(update: Update, context: ContextTypes.DE
     if chat_id is None:
         return
     await context.bot.send_message(chat_id, get_text("outage_check_on_add_title", lang), parse_mode=ParseMode.MARKDOWN_V2)
-    coros = [
-        parse_all_water_announcements_async(),
-        parse_all_gas_announcements_async(),
-        parse_all_electric_announcements_async()
-    ]
-    await asyncio.gather(*(c for c in coros if c is not None))
     all_recent_outages = await db_manager.find_outages_for_address_text(address_data['full_address'])
     if not all_recent_outages:
         await context.bot.send_message(chat_id, get_text("outage_check_on_add_none_found", lang))
