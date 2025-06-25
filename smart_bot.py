@@ -444,6 +444,12 @@ async def confirm_address_callback(update: Update, context: ContextTypes.DEFAULT
     )
     if success:
         await query.edit_message_text(get_text("address_added_success", lang), reply_markup=None)
+        if message := getattr(query, 'message', None):
+            await context.bot.send_message(
+                chat_id=message.chat_id,
+                text=get_text("menu_message", lang),
+                reply_markup=get_main_menu_keyboard(lang)
+            )
         if user_data is not None:
             user_data["step"] = UserSteps.NONE.name
         await check_outages_for_new_address(update, context, address_data)
@@ -458,16 +464,15 @@ async def check_outages_for_new_address(update: Update, context: ContextTypes.DE
     chat_id = safe_get(safe_get(update, 'effective_chat'), 'id')
     if chat_id is None:
         return
-    await context.bot.send_message(chat_id, get_text("outage_check_on_add_title", lang), parse_mode=ParseMode.MARKDOWN_V2)
+    await context.bot.send_message(chat_id, escape_markdown_v2(get_text("outage_check_on_add_title", lang)), parse_mode=ParseMode.MARKDOWN_V2)
     all_recent_outages = await db_manager.find_outages_for_address_text(address_data['full_address'])
     if not all_recent_outages:
-        await context.bot.send_message(chat_id, get_text("outage_check_on_add_none_found", lang))
+        await context.bot.send_message(chat_id, escape_markdown_v2(get_text("outage_check_on_add_none_found", lang)), parse_mode=ParseMode.MARKDOWN_V2)
     else:
-        response_text = get_text("outage_check_on_add_found", lang)
+        response_text = escape_markdown_v2(get_text("outage_check_on_add_found", lang))
         for outage in all_recent_outages:
-            response_text += f"\n\n- {outage['source_type']}: {outage.get('start_datetime', 'N/A')}"
-
-        await context.bot.send_message(chat_id, response_text)
+            response_text += f"\n\n- {escape_markdown_v2(str(outage['source_type']))}: {escape_markdown_v2(str(outage.get('start_datetime', 'N/A')))}"
+        await context.bot.send_message(chat_id, response_text, parse_mode=ParseMode.MARKDOWN_V2)
 
     last_outage = await db_manager.get_last_outage_for_address(address_data['full_address'])
     if last_outage:
@@ -751,7 +756,7 @@ async def handle_frequency_selection(update: Update, context: ContextTypes.DEFAU
     if selected_interval and user_id is not None:
         await db_manager.update_user_frequency(user_id, selected_interval)
         result = safe_call(message, 'reply_text', get_text("frequency_set_success", lang), reply_markup=get_main_menu_keyboard(lang))
-        if inspect.isawaitable(result):
+        if result is not None and inspect.isawaitable(result):
             await result
         safe_set_user_data(getattr(context, 'user_data', None), "step", UserSteps.NONE.name)
     else:
@@ -801,7 +806,7 @@ async def handle_support_message(update: Update, context: ContextTypes.DEFAULT_T
     )
     delivered = False
     try:
-        await context.bot.send_message(chat_id=SUPPORT_CHAT_ID, text=support_message, parse_mode=ParseMode.MARKDOWN_V2)
+        await context.bot.send_message(chat_id=SUPPORT_CHAT_ID, text=escape_markdown_v2(support_message), parse_mode=ParseMode.MARKDOWN_V2)
         delivered = True
     except Exception as e:
         log.error(f"Не удалось доставить сообщение админу: {e}")
@@ -1011,6 +1016,3 @@ async def clear_addresses_callback(update: Update, context: ContextTypes.DEFAULT
             if user_data is not None:
                 user_data["step"] = UserSteps.NONE.name
             await query.edit_message_text(get_text("action_cancelled", lang), reply_markup=get_main_menu_keyboard(lang))
-
-if __name__ == "__main__":
-    main()

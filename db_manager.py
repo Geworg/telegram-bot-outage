@@ -86,8 +86,8 @@ async def setup_schema():
         ''')
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS sent_notifications (
-                user_id BIGINT NOT NULL,
-                outage_hash VARCHAR(64) NOT NULL,
+                user_id BIGINT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+                outage_hash VARCHAR(64) NOT NULL REFERENCES outages(raw_text_hash) ON DELETE CASCADE,
                 sent_at TIMESTAMPTZ DEFAULT NOW(),
                 PRIMARY KEY (user_id, outage_hash)
             );
