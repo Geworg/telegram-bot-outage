@@ -58,7 +58,7 @@ translations["enter_street"] = {"hy": "Ընտրված է {region}։\nԱյժմ մ
 translations["address_verifying"] = {"hy": "⏳ Ստուգում եմ հասցեն...", "ru": "⏳ Проверяю адрес...", "en": "⏳ Verifying address..."}
 translations["address_not_found_yandex"] = {"hy": "Ցավոք, չհաջողվեց գտնել այդպիսի հասցե։ Խնդրում եմ, փորձեք նորից՝ մուտքագրելով ինչպես Յանդեքս Քարտեզում, օրինակ՝ улица Ханджяна, 9Б։", "ru": "К сожалению, нам не удалось найти такой адрес. Попробуйте еще раз, введя его как в Яндекс.Картах, например: улица Ханджяна, 9Б.", "en": "Unfortunately, we were unable to find such an address. Please try again by entering it as in Yandex Maps, for example: улица Ханджяна, 9Б."}
 translations["address_confirm_prompt"] = {"hy": "Հայտնաբերվել է հետևյալ հասցեն՝\n\n`{address}`\n\nՊահպանե՞լ այն:", "ru": "Найден следующий адрес:\n\n`{address}`\n\nСохранить его?", "en": "The following address was found:\n\n`{address}`\n\nSave it?"}
-translations["address_added_success"] = {"hy": "✅ Հասցեն հաջողությամբ ավելացվեց։", "ru": "✅ Адрес успешно добавлен.", "en": "✅ Address added successfully."}
+translations["address_added_success"] = {"hy": "✅ Հասցեն հաջողությամբ ավելացվել է։ Մուտքագրեք /start հրամանը։", "ru": "✅ Адрес успешно добавлен. Введите команду /start", "en": "✅ The address has been successfully added. Enter the command /start"}
 translations["address_already_exists"] = {"hy": "ℹ️ Այս հասցեն արդեն գոյություն ունի ձեր ցուցակում։", "ru": "ℹ️ Этот адрес уже существует в вашем списке.", "en": "ℹ️ This address already exists in your list."}
 translations["no_addresses_yet"] = {"hy": "Դուք դեռ հասցեներ չեք ավելացրել։", "ru": "У вас пока нет добавленных адресов.", "en": "You haven't added any addresses yet."}
 translations["your_addresses_list_title"] = {"hy": "Ձեր պահպանված հասցեները:", "ru": "Ваши сохранённые адреса:", "en": "Your saved addresses:"}
@@ -132,3 +132,6 @@ for i, (q_en, a_en, q_ru, a_ru, q_hy, a_hy) in enumerate([
 
 translations["faq_prev_btn"] = {"hy": "⏮ Հետ", "ru": "⏮ Назад", "en": "⏮ Back"}
 translations["faq_next_btn"] = {"hy": "⏭ Առաջ", "ru": "⏭ Вперёд", "en": "⏭ Next"}
+translations["address_check_summary"] = {"hy": "✅ Ձեր հասցեն պահպանված է։ Եթե այս պահին անջատումներ չկան, դուք получите уведомления при их появлении։\n\nՀասցե՝ {address}",
+                                         "ru": "✅ Ваш адрес сохранён. Если сейчас нет отключений, вы получите уведомление при их появлении.\n\nАдрес: {address}",
+                                         "en": "✅ Your address has been saved. If there are no outages now, you will be notified when they appear.\n\nAddress: {address}"}

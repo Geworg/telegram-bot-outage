@@ -16,7 +16,7 @@ def get_text_hash(text: str) -> str:
 def parse_dates_and_times_from_entities(entities: List[Dict[str, Any]], original_text: str) -> Dict[str, Optional[datetime]]:
     """
     A sophisticated function to find start and end datetimes from NER entities and raw text.
-    Handles various formats like "June 15, from 10:00 to 18:00".
+    Handles various formats like "June 15, from 10:00 to 18:00" and "24.06.2025 23:50".
 
     Args:
         entities: A list of entity dicts from the NER model.
@@ -26,35 +26,47 @@ def parse_dates_and_times_from_entities(entities: List[Dict[str, Any]], original
         A dictionary containing 'start_datetime' and 'end_datetime'.
     """
     dates = [e['word'] for e in entities if e['entity_group'] in ['DATE', 'TIME'] or (e['entity_group'] == 'CARDINAL' and re.match(r'\d{1,2}:\d{2}', e['word']))]
-    
     times = sorted(re.findall(r'(\d{1,2}:\d{2})', original_text))
-    
     start_dt, end_dt = None, None
-    
     try:
-        if len(times) >= 2:
+        dt_matches = re.findall(r'(\d{2}\.\d{2}\.\d{4})[\s|,]*(\d{1,2}:\d{2})?', original_text)
+        if dt_matches:
+            if len(dt_matches) >= 2:
+                start_str, start_time = dt_matches[0]
+                end_str, end_time = dt_matches[1]
+                if start_time:
+                    start_dt = datetime.strptime(f"{start_str} {start_time}", "%d.%m.%Y %H:%M")
+                else:
+                    start_dt = datetime.strptime(start_str, "%d.%m.%Y")
+                if end_time:
+                    end_dt = datetime.strptime(f"{end_str} {end_time}", "%d.%m.%Y %H:%M")
+                else:
+                    end_dt = datetime.strptime(end_str, "%d.%m.%Y")
+            elif len(dt_matches) == 1:
+                date_str, first_time = dt_matches[0]
+                found_times = re.findall(r'(\d{1,2}:\d{2})', original_text)
+                if len(found_times) >= 2:
+                    start_dt = datetime.strptime(f"{date_str} {found_times[0]}", "%d.%m.%Y %H:%M")
+                    end_dt = datetime.strptime(f"{date_str} {found_times[1]}", "%d.%m.%Y %H:%M")
+                elif first_time:
+                    start_dt = datetime.strptime(f"{date_str} {first_time}", "%d.%m.%Y %H:%M")
+        if not start_dt and len(times) >= 2:
             date_match = re.search(r'(\w+\s\d{1,2})', original_text, re.IGNORECASE)
             if date_match:
                 date_str = date_match.group(1)
                 now = datetime.now(YEREVAN_TZ)
-                
                 start_datetime_str = f"{date_str} {now.year} {times[0]}"
                 end_datetime_str = f"{date_str} {now.year} {times[1]}"
-                
                 start_dt = datetime.strptime(start_datetime_str, "%B %d %Y %H:%M")
                 end_dt = datetime.strptime(end_datetime_str, "%B %d %Y %H:%M")
-                
                 start_dt = YEREVAN_TZ.localize(start_dt)
                 end_dt = YEREVAN_TZ.localize(end_dt)
-
     except Exception as e:
         log.warning(f"Could not parse datetime from text: '{original_text}'. Error: {e}")
-
     return {
         'start_datetime': start_dt,
         'end_datetime': end_dt
     }
-
 
 def structure_ner_entities(entities: List[Dict[str, Any]], original_english_text: str) -> Dict[str, Any]:
     """

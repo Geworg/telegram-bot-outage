@@ -444,12 +444,6 @@ async def confirm_address_callback(update: Update, context: ContextTypes.DEFAULT
     )
     if success:
         await query.edit_message_text(get_text("address_added_success", lang), reply_markup=None)
-        if message := getattr(query, 'message', None):
-            await context.bot.send_message(
-                chat_id=message.chat_id,
-                text=get_text("menu_message", lang),
-                reply_markup=get_main_menu_keyboard(lang)
-            )
         if user_data is not None:
             user_data["step"] = UserSteps.NONE.name
         await check_outages_for_new_address(update, context, address_data)
@@ -480,6 +474,12 @@ async def check_outages_for_new_address(update: Update, context: ContextTypes.DE
     else:
         await context.bot.send_message(chat_id, get_text("no_past_outages", lang))
 
+    await context.bot.send_message(
+        chat_id,
+        get_text("address_check_summary", lang, address=address_data.get('full_address', '')),
+        reply_markup=get_main_menu_keyboard(lang)
+    )
+
 @typing_indicator_for_all
 async def qa_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = safe_get(update, 'callback_query')
@@ -490,15 +490,8 @@ async def qa_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
     if data.startswith("faq_q_"):
         parts = data.split('_')
-        if len(parts) < 4:
-            await query.answer(get_text("unknown_command", lang), show_alert=True)
-            return
-        try:
-            q_idx = int(parts[2])
-            page = int(parts[3])
-        except Exception:
-            await query.answer(get_text("unknown_command", lang), show_alert=True)
-            return
+        q_idx = int(parts[2])
+        page = int(parts[3])
         q_key = FAQ_QUESTION_KEYS[page * FAQ_PAGE_SIZE + q_idx]
         a_key = FAQ_ANSWER_KEYS[page * FAQ_PAGE_SIZE + q_idx]
         answer_text = get_text(a_key, lang)
@@ -508,26 +501,15 @@ async def qa_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         keyboard = InlineKeyboardMarkup(buttons)
         await query.edit_message_text(answer_text, reply_markup=keyboard)
     elif data.startswith("faq_page_"):
-        try:
-            page = int(data.split('_')[2])
-        except Exception:
-            page = 0
-        if user_data is not None:
-            user_data['faq_page'] = page
+        page = int(data.split('_')[2])
         await send_faq_page(query, context, page, lang)
     elif data.startswith("faq_prev_"):
-        try:
-            page = int(data.split('_')[2]) - 1
-        except Exception:
-            page = 0
+        page = int(data.split('_')[2]) - 1
         if user_data is not None:
             user_data['faq_page'] = page
         await send_faq_page(query, context, page, lang)
     elif data.startswith("faq_next_"):
-        try:
-            page = int(data.split('_')[2]) + 1
-        except Exception:
-            page = 0
+        page = int(data.split('_')[2]) + 1
         if user_data is not None:
             user_data['faq_page'] = page
         await send_faq_page(query, context, page, lang)
@@ -774,7 +756,7 @@ async def handle_frequency_selection(update: Update, context: ContextTypes.DEFAU
     if selected_interval and user_id is not None:
         await db_manager.update_user_frequency(user_id, selected_interval)
         result = safe_call(message, 'reply_text', get_text("frequency_set_success", lang), reply_markup=get_main_menu_keyboard(lang))
-        if result is not None and inspect.isawaitable(result):
+        if inspect.isawaitable(result):
             await result
         safe_set_user_data(getattr(context, 'user_data', None), "step", UserSteps.NONE.name)
     else:
@@ -824,7 +806,7 @@ async def handle_support_message(update: Update, context: ContextTypes.DEFAULT_T
     )
     delivered = False
     try:
-        await context.bot.send_message(chat_id=SUPPORT_CHAT_ID, text=escape_markdown_v2(support_message), parse_mode=ParseMode.MARKDOWN_V2)
+        await context.bot.send_message(chat_id=SUPPORT_CHAT_ID, text=support_message, parse_mode=ParseMode.MARKDOWN_V2)
         delivered = True
     except Exception as e:
         log.error(f"Не удалось доставить сообщение админу: {e}")
@@ -1036,4 +1018,4 @@ async def clear_addresses_callback(update: Update, context: ContextTypes.DEFAULT
             await query.edit_message_text(get_text("action_cancelled", lang), reply_markup=get_main_menu_keyboard(lang))
 
 if __name__ == "__main__":
-        main()
+    main()
