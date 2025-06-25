@@ -490,8 +490,15 @@ async def qa_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
     if data.startswith("faq_q_"):
         parts = data.split('_')
-        q_idx = int(parts[2])
-        page = int(parts[3])
+        if len(parts) < 4:
+            await query.answer(get_text("unknown_command", lang), show_alert=True)
+            return
+        try:
+            q_idx = int(parts[2])
+            page = int(parts[3])
+        except Exception:
+            await query.answer(get_text("unknown_command", lang), show_alert=True)
+            return
         q_key = FAQ_QUESTION_KEYS[page * FAQ_PAGE_SIZE + q_idx]
         a_key = FAQ_ANSWER_KEYS[page * FAQ_PAGE_SIZE + q_idx]
         answer_text = get_text(a_key, lang)
@@ -501,15 +508,26 @@ async def qa_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         keyboard = InlineKeyboardMarkup(buttons)
         await query.edit_message_text(answer_text, reply_markup=keyboard)
     elif data.startswith("faq_page_"):
-        page = int(data.split('_')[2])
+        try:
+            page = int(data.split('_')[2])
+        except Exception:
+            page = 0
+        if user_data is not None:
+            user_data['faq_page'] = page
         await send_faq_page(query, context, page, lang)
     elif data.startswith("faq_prev_"):
-        page = int(data.split('_')[2]) - 1
+        try:
+            page = int(data.split('_')[2]) - 1
+        except Exception:
+            page = 0
         if user_data is not None:
             user_data['faq_page'] = page
         await send_faq_page(query, context, page, lang)
     elif data.startswith("faq_next_"):
-        page = int(data.split('_')[2]) + 1
+        try:
+            page = int(data.split('_')[2]) + 1
+        except Exception:
+            page = 0
         if user_data is not None:
             user_data['faq_page'] = page
         await send_faq_page(query, context, page, lang)
