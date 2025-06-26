@@ -11,7 +11,6 @@ NER_MODEL = os.getenv("NER_MODEL", "dslim/bert-base-NER")
 
 def load_models():
     """
-    (Больше не требуется.)
     Оставлено для совместимости. Теперь модели загружаются через API Hugging Face.
     """
     log.info("AI models are now accessed via Hugging Face API. No local loading required.")
